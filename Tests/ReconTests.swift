@@ -79,6 +79,44 @@ final class ReconTests: XCTestCase {
         }
     }
 
+    /// A small hole in a closed surface gets closed; the long outer border of an open sheet is left alone.
+    func testFillHolesClosesSmallHolesOnly() {
+        var sphere = Self.subdividedCube(n: 12)
+        for i in sphere.positions.indices { sphere.positions[i] = simd_normalize(sphere.positions[i]) * 0.5 }
+        XCTAssertEqual(sphere.boundaryEdgeCount(), 0)
+        // Cut out every triangle touching one vertex: a hole of about 4–8 edges.
+        let victim = UInt32(sphere.positions.count / 2)
+        let keep: [Bool] = (0..<sphere.triangleCount).map { t in
+            ![sphere.indices[t * 3], sphere.indices[t * 3 + 1], sphere.indices[t * 3 + 2]].contains(victim)
+        }
+        sphere.filterTriangles { keep[$0] }
+        XCTAssertGreaterThan(sphere.boundaryEdgeCount(), 2)
+        XCTAssertEqual(sphere.fillHoles(maxEdges: 80), 1)
+        XCTAssertEqual(sphere.boundaryEdgeCount(), 0, "the hole should be closed")
+
+        // Open 30×30 grid: its border has 120 edges, more than the limit.
+        var sheet = ReconMesh()
+        let n = 30
+        for j in 0...n { for i in 0...n { sheet.positions.append(SIMD3(Float(i) * 0.02, 0, Float(j) * 0.02)) } }
+        for j in 0..<n {
+            for i in 0..<n {
+                let a = UInt32(j * (n + 1) + i), b = a + 1, c = a + UInt32(n + 1) + 1, d = a + UInt32(n + 1)
+                sheet.indices += [a, d, c, a, c, b]
+            }
+        }
+        let before = sheet.triangleCount
+        XCTAssertEqual(sheet.fillHoles(maxEdges: 80), 0)
+        XCTAssertEqual(sheet.triangleCount, before)
+    }
+
+    /// The feet rule: floor spots right below the phone are masked, others aren't; higher points never are.
+    func testPersonMaskHidesFeetOnly() {
+        let phone = SIMD3<Float>(1, 1.3, 1)
+        XCTAssertTrue(PersonMask.hides(SIMD3(1.2, 0.0, 1.1), cameraPosition: phone, floorY: 0))
+        XCTAssertFalse(PersonMask.hides(SIMD3(2.5, 0.0, 1.0), cameraPosition: phone, floorY: 0))
+        XCTAssertFalse(PersonMask.hides(SIMD3(1.1, 0.9, 1.0), cameraPosition: phone, floorY: 0))
+    }
+
     // MARK: Simplification
 
     func testSimplifierKeepsCubeShape() {

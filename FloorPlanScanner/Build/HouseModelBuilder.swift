@@ -111,6 +111,7 @@ enum HouseModelBuilder {
                                                     decodeSize: 2048))
         }
         let baker = TextureBaker(surfaces: geometry.surfaces, sources: sources)
+        baker.floorY = geometry.floorY
 
         // 2b. Line the photos up with the geometry (photometric pose refinement).
         progress(p0, "Lining up \(baker.photoCount) photos…")

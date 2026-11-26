@@ -207,14 +207,25 @@ final class TSDFVolume {
                         for x in 0..<side {
                             let cell = origin &+ SIMD3(x, y, z)
                             var values = SIMD8<Float>()
-                            var ok = true
-                            var mask = 0
+                            var missing = -1
+                            var bad = false
+                            var sum: Float = 0
                             for (c, o) in corners.enumerated() {
-                                guard let v = self.value(cell &+ o) else { ok = false; break }
-                                values[c] = v
-                                if v < 0 { mask |= 1 << c }
+                                if let v = self.value(cell &+ o) {
+                                    values[c] = v
+                                    sum += v
+                                } else if missing < 0 {
+                                    missing = c          // one unobserved corner is tolerated…
+                                } else {
+                                    bad = true           // …two or more are not (could invent fake surfaces)
+                                    break
+                                }
                             }
-                            guard ok, mask != 0, mask != 255 else { continue }
+                            guard !bad else { continue }
+                            if missing >= 0 { values[missing] = sum / 7 }   // closes 1-voxel gaps
+                            var mask = 0
+                            for c in 0..<8 where values[c] < 0 { mask |= 1 << c }
+                            guard mask != 0, mask != 255 else { continue }
                             var sum = SIMD3<Float>.zero
                             var n: Float = 0
                             for (e0, e1) in edges where (values[e0] < 0) != (values[e1] < 0) {

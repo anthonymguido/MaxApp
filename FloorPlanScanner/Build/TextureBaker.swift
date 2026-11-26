@@ -130,6 +130,9 @@ final class TextureBaker {
     var photoCount: Int { cameras.count }
     /// Photos left out because tracking broke right after them.
     private(set) var skippedPhotos = 0
+    /// Floor height (world y). When set, photos aren't used for floor spots right below where the phone was
+    /// (the user's feet are there in the photo).
+    var floorY: Float?
 
     // MARK: Pass 1: choose photos for every cell, and balance brightness between photos
 
@@ -222,6 +225,7 @@ final class TextureBaker {
         let toCam = cam.position - point
         let dist = simd_length(toCam)
         guard dist > 0.15, dist < options.maxDistance else { return nil }
+        if let floorY, PersonMask.hides(point, cameraPosition: cam.position, floorY: floorY) { return nil }
         let facing = simd_dot(toCam / dist, normal)
         guard facing > 0.25, let px = project(point, cam, margin: 0.02) else { return nil }
         // Lower weight near the photo's edges, so seams fall where photos are weakest.

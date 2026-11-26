@@ -172,7 +172,9 @@ enum DepthFusion {
 
         // 4. Clean up and simplify.
         progress(0.84, "Cleaning up the 3D shape…")
-        mesh.removeSmallComponents(minTriangles: 400)
+        mesh.trimFringe(passes: 2)                                    // frayed slivers at open borders
+        mesh.removeSmallComponents(minTriangles: 1500, minArea: 0.05)  // floating bits
+        let holes = mesh.fillHoles(maxEdges: 80)                      // small gaps (up to ~1.6 m around)
         guard mesh.triangleCount > 0 else { return nil }
         mesh.taubinSmooth(iterations: 1)
         if isCancelled() { return nil }
@@ -182,7 +184,8 @@ enum DepthFusion {
         }
         progress(1, "3D shape ready")
         let mb = volume.memoryBytes / 1_048_576
-        var note = "3D shape fused from \(fusedCount) of \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume)."
+        var note = holes > 0 ? "\(holes) small holes closed. " : ""
+        note += "3D shape fused from \(fusedCount) of \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume)."
         if offset != .zero {
             note += String(format: " Detail pass lined up with the room scan (moved %.0f cm: %.0f / %.0f / %.0f).",
                            simd_length(offset) * 100, offset.x * 100, offset.y * 100, offset.z * 100)

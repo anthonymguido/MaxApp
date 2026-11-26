@@ -89,8 +89,97 @@ struct ReconMesh {
         compact()
     }
 
-    /// Removes connected pieces with fewer than `minTriangles` triangles (floating noise).
-    mutating func removeSmallComponents(minTriangles: Int) {
+    /// Undirected edge key.
+    @inline(__always)
+    static func edgeKey(_ a: Int, _ b: Int) -> UInt64 {
+        (UInt64(min(a, b)) << 32) | UInt64(max(a, b))
+    }
+
+    /// Number of edges used by only one triangle (0 = closed surface).
+    func boundaryEdgeCount() -> Int {
+        var count: [UInt64: Int] = [:]
+        for t in 0..<triangleCount {
+            let (a, b, c) = triangle(t)
+            for k in [Self.edgeKey(a, b), Self.edgeKey(b, c), Self.edgeKey(c, a)] { count[k, default: 0] += 1 }
+        }
+        return count.values.filter { $0 == 1 }.count
+    }
+
+    /// Closes small holes: boundary loops of at most `maxEdges` edges get a fan of triangles around their centre.
+    /// Big open borders (the edge of what was scanned) are left alone.
+    /// - Returns: number of holes filled.
+    @discardableResult
+    mutating func fillHoles(maxEdges: Int) -> Int {
+        // Directed edges present; a boundary half-edge a→b has no b→a.
+        var directed = Set<UInt64>()
+        directed.reserveCapacity(indices.count)
+        func dkey(_ a: Int, _ b: Int) -> UInt64 { (UInt64(a) << 32) | UInt64(b) }
+        for t in 0..<triangleCount {
+            let (a, b, c) = triangle(t)
+            directed.insert(dkey(a, b)); directed.insert(dkey(b, c)); directed.insert(dkey(c, a))
+        }
+        // The hole runs the other way round: for boundary a→b, the loop goes b→a.
+        var next: [Int: Int] = [:]
+        var ambiguous = Set<Int>()
+        for t in 0..<triangleCount {
+            let (a, b, c) = triangle(t)
+            for (u, v) in [(a, b), (b, c), (c, a)] where !directed.contains(dkey(v, u)) {
+                if next[v] != nil { ambiguous.insert(v) }
+                next[v] = u
+            }
+        }
+        var visited = Set<Int>()
+        var filled = 0
+        for start in next.keys where !visited.contains(start) && !ambiguous.contains(start) {
+            var loop = [start]
+            var v = start
+            var ok = false
+            while loop.count <= maxEdges {
+                guard let n = next[v], !ambiguous.contains(n) else { break }
+                if n == start { ok = true; break }
+                if visited.contains(n) || loop.contains(n) { break }
+                loop.append(n)
+                v = n
+            }
+            for x in loop { visited.insert(x) }
+            guard ok, loop.count >= 3 else { continue }
+            if loop.count == 3 {
+                indices += [UInt32(loop[0]), UInt32(loop[1]), UInt32(loop[2])]
+            } else {
+                var centre = SIMD3<Float>.zero
+                for x in loop { centre += positions[x] }
+                centre /= Float(loop.count)
+                let ci = UInt32(positions.count)
+                positions.append(centre)
+                for i in loop.indices {
+                    indices += [UInt32(loop[i]), UInt32(loop[(i + 1) % loop.count]), ci]
+                }
+            }
+            filled += 1
+        }
+        return filled
+    }
+
+    /// Removes frayed slivers at open borders (triangles with two border edges), `passes` times.
+    mutating func trimFringe(passes: Int) {
+        for _ in 0..<passes {
+            var count: [UInt64: Int] = [:]
+            for t in 0..<triangleCount {
+                let (a, b, c) = triangle(t)
+                for k in [Self.edgeKey(a, b), Self.edgeKey(b, c), Self.edgeKey(c, a)] { count[k, default: 0] += 1 }
+            }
+            let keep: [Bool] = (0..<triangleCount).map { t in
+                let (a, b, c) = triangle(t)
+                let border = [Self.edgeKey(a, b), Self.edgeKey(b, c), Self.edgeKey(c, a)].filter { count[$0] == 1 }.count
+                return border < 2
+            }
+            if keep.allSatisfy({ $0 }) { return }
+            filterTriangles { keep[$0] }
+        }
+    }
+
+    /// Removes connected pieces with fewer than `minTriangles` triangles or less than `minArea` m² (floating noise).
+    mutating func removeSmallComponents(minTriangles: Int, minArea: Float = 0) {
         guard triangleCount > 0 else { return }
         var parent = Array(0..<positions.count)
         func find(_ x: Int) -> Int {
@@ -108,12 +197,14 @@ struct ReconMesh {
             parent[find(rc)] = find(ra)
         }
         var size: [Int: Int] = [:]
+        var area: [Int: Float] = [:]
         var root = [Int](repeating: 0, count: triangleCount)
         for t in 0..<triangleCount {
             root[t] = find(triangle(t).0)
             size[root[t], default: 0] += 1
+            area[root[t], default: 0] += faceArea(t)
         }
-        filterTriangles { t in (size[root[t]] ?? 0) >= minTriangles }
+        filterTriangles { t in (size[root[t]] ?? 0) >= minTriangles && (area[root[t]] ?? 0) >= minArea }
     }
 
     /// Taubin smoothing: removes voxel steps without shrinking the shape.

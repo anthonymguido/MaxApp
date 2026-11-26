@@ -96,7 +96,8 @@ extension TextureBaker {
         progress(0.36, "Choosing the sharpest photo for every surface…")
         let adjacency = mesh.faceAdjacency()
         let labels = ViewSelection.solveGraph(labels: candidates.map { $0.map(\.0) },
-                                              scores: candidates.map { $0.map(\.1) }, neighbours: adjacency)
+                                              scores: candidates.map { $0.map(\.1) }, neighbours: adjacency,
+                                              smoothness: 0.6)
         if isCancelled() { return empty }
 
         // 4. Charts: connected faces with the same photo, kept under 1024 px so atlases pack well.
@@ -317,6 +318,7 @@ extension TextureBaker {
             let toCam = cam.position - c
             let dist = simd_length(toCam)
             guard dist > 0.15, dist < 6 else { continue }
+            if let floorY, PersonMask.hides(c, cameraPosition: cam.position, floorY: floorY) { continue }
             let facing = simd_dot(toCam / dist, faceNormals[f])
             guard facing > 0.05, let pc = project(c, cam, margin: 0) else { continue }
             // Hidden behind something nearer in this photo? (Strict test, or a loose one for the fallback list.)

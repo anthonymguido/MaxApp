@@ -96,6 +96,7 @@ extension TextureBaker {
                 for (i, p) in points.enumerated() {
                     let toCam = cam.position - p
                     let dist = simd_length(toCam)
+                    if let floorY = self.floorY, PersonMask.hides(p, cameraPosition: cam.position, floorY: floorY) { continue }
                     guard dist > 0.2, dist < 5, simd_dot(toCam / dist, normals[i]) > 0.3,
                           let px = self.project(p, cam, margin: 0.03) else { continue }
                     let zx = min(zw - 1, Int(px.x / cam.width * Float(zw)))
