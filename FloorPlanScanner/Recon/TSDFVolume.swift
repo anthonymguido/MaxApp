@@ -118,6 +118,40 @@ final class TSDFVolume {
         }
     }
 
+    /// How well a depth frame agrees with what's already fused: of its sampled surface points that land in observed
+    /// voxels, how many lie on the existing surface (|distance| under ~¾ of the truncation band).
+    /// A frame whose camera position drifted (tracking error) lands its points in free space or behind surfaces,
+    /// so it agrees poorly and can be skipped before it adds a ghost copy of the room.
+    func agreement(depthMM: [UInt16], confidence: [UInt8]?, width: Int, height: Int, camera: DepthCamera,
+                   minConfidence: UInt8 = 2, maxDepth: Float = 4.5, samples: Int = 600) -> (checked: Int, agreeing: Int) {
+        let toWorld = camera.cameraToWorld
+        let step = max(1, Int((Float(width * height) / Float(samples)).squareRoot()))
+        var checked = 0, agreeing = 0
+        var v = step / 2
+        while v < height {
+            var u = step / 2
+            while u < width {
+                defer { u += step }
+                let i = v * width + u
+                let mm = depthMM[i]
+                guard mm > 0 else { continue }
+                if let confidence, confidence[i] < minConfidence { continue }
+                let d = Float(mm) / 1000
+                guard d > 0.15, d < maxDepth else { continue }
+                let pc = SIMD4<Float>((Float(u) + 0.5 - camera.cx) / camera.fx * d,
+                                      -(Float(v) + 0.5 - camera.cy) / camera.fy * d, -d, 1)
+                let p = toWorld * pc
+                let key = SIMD3<Int32>(Int32((p.x / voxelSize).rounded(.down)), Int32((p.y / voxelSize).rounded(.down)),
+                                       Int32((p.z / voxelSize).rounded(.down)))
+                guard let value = value(key) else { continue }
+                checked += 1
+                if abs(value) < 0.75 { agreeing += 1 }
+            }
+            v += step
+        }
+        return (checked, agreeing)
+    }
+
     /// Signed distance (in truncation units, −1…1) at a voxel, or nil if never observed.
     @inline(__always)
     func value(_ key: SIMD3<Int32>) -> Float? {

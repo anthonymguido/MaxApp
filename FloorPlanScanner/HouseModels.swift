@@ -117,9 +117,15 @@ struct Keyframe: Codable, Hashable {
     var timestamp: Double
     /// How fast the phone was turning when the photo was taken, degrees per second (blur estimate).
     var turnRate: Float
+    /// Tracking quality 0…1 when recorded (newer scans).
+    var quality: Float? = nil
+    /// Recorded just before tracking broke: its pose may be off, so the build skips it.
+    var suspect: Bool? = nil
 }
 
 struct KeyframeLog: Codable {
     var description = "Photos recorded during the LiDAR room scan. transform = camera-to-world (column-major, metres, Y up, ARKit camera looks down -Z). intrinsics = fx, fy, cx, cy in photo pixels. Depth = raw UInt16 millimetres, row-major."
     var frames: [Keyframe] = []
+    /// World positions (x, y, z) where tracking was lost during this recording.
+    var losses: [[Float]]? = nil
 }

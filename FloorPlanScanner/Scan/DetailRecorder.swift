@@ -16,11 +16,15 @@ struct DepthFrame: Codable, Hashable {
     /// fx, fy, cx, cy scaled to the depth map's resolution.
     var intrinsics: [Float]
     var timestamp: Double
+    var quality: Float? = nil
+    /// Recorded just before tracking broke: the build skips it.
+    var suspect: Bool? = nil
 }
 
 struct DepthFrameLog: Codable {
     var description = "LiDAR depth frames from the detail pass. depth = UInt16 millimetres (0 = unknown), confidence = UInt8 0/1/2, row-major. transform = camera-to-world (column-major, metres, Y up, camera looks down -Z). intrinsics = fx, fy, cx, cy at depth resolution."
     var frames: [DepthFrame] = []
+    var losses: [[Float]]? = nil
 }
 
 /// Records the detail pass: dense LiDAR depth (for real 3D shapes) and 12 MP photos (for sharp textures),
@@ -30,6 +34,10 @@ final class DetailRecorder: ObservableObject {
     @Published private(set) var depthCount = 0
     @Published private(set) var photoCount = 0
     @Published private(set) var trackingOK = true
+    /// When set, nothing is recorded unless tracking is good and steady.
+    weak var monitor: TrackingMonitor?
+    /// Live coverage, for the overlay.
+    var coverage: CoverageGrid?
 
     static let maxPhotos = 400
     static let maxDepthFrames = 2500
@@ -57,24 +65,30 @@ final class DetailRecorder: ObservableObject {
 
     var photosFull: Bool { photoCount >= Self.maxPhotos }
 
-    func begin(photoDir: URL, depthDir: URL, photoLogURL: URL, depthLogURL: URL) {
+    /// - Parameter append: keep what an earlier detail pass recorded and add to it (to fill gaps).
+    func begin(photoDir: URL, depthDir: URL, photoLogURL: URL, depthLogURL: URL, append: Bool = false) {
         self.photoDir = photoDir
         self.depthDir = depthDir
         self.photoLogURL = photoLogURL
         self.depthLogURL = depthLogURL
         photoLog = KeyframeLog()
         depthLog = DepthFrameLog()
-        depthCount = 0
-        photoCount = 0
         lastDepthPosition = nil
         lastPhotoPosition = nil
         prevForward = nil
         prevTime = nil
         let fm = FileManager.default
+        if append {
+            let decoder = JSONDecoder()
+            if let d = try? Data(contentsOf: photoLogURL), let l = try? decoder.decode(KeyframeLog.self, from: d) { photoLog = l }
+            if let d = try? Data(contentsOf: depthLogURL), let l = try? decoder.decode(DepthFrameLog.self, from: d) { depthLog = l }
+        }
         for d in [photoDir, depthDir] {
-            try? fm.removeItem(at: d)
+            if !append { try? fm.removeItem(at: d) }
             try? fm.createDirectory(at: d, withIntermediateDirectories: true)
         }
+        depthCount = depthLog.frames.count
+        photoCount = photoLog.frames.count
     }
 
     /// The detail pass's camera setup. With the room scan's world map, ARKit relocalizes into the same
@@ -106,6 +120,7 @@ final class DetailRecorder: ObservableObject {
             return
         }
         trackingOK = true
+        if let monitor, !monitor.canRecord { prevForward = nil; return }
         let t = frame.camera.transform
         let position = SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         let forward = simd_normalize(-SIMD3(t.columns.2.x, t.columns.2.y, t.columns.2.z))
@@ -138,12 +153,24 @@ final class DetailRecorder: ObservableObject {
                 lastPhotoForward = forward
                 lastPhotoTime = frame.timestamp
                 capturePhoto(session, turnRate: turnRate, dir: photoDir)
+                if let sceneDepth = frame.sceneDepth {
+                    coverage?.add(depth: sceneDepth.depthMap, confidence: sceneDepth.confidenceMap,
+                                  intrinsics: frame.camera.intrinsics, imageWidth: CVPixelBufferGetWidth(frame.capturedImage),
+                                  cameraToWorld: frame.camera.transform, photo: true)
+                }
             }
         }
     }
 
     func finish() {
         writeLogs()
+    }
+
+    /// Tracking broke at `time`: what was recorded in the second before may have drifted, so flag it.
+    func trackingBroke(at time: TimeInterval, position: SIMD3<Float>?) {
+        for i in depthLog.frames.indices where depthLog.frames[i].timestamp > time - 1.0 { depthLog.frames[i].suspect = true }
+        for i in photoLog.frames.indices where photoLog.frames[i].timestamp > time - 1.0 { photoLog.frames[i].suspect = true }
+        if let p = position { depthLog.losses = (depthLog.losses ?? []) + [[p.x, p.y, p.z]] }
     }
 
     // MARK: Private
@@ -159,8 +186,10 @@ final class DetailRecorder: ObservableObject {
         let entry = DepthFrame(index: index, depth: stem + ".depth", confidence: confidence == nil ? nil : stem + ".conf",
                                width: depth.width, height: depth.height, transform: Self.flatten(frame.camera.transform),
                                intrinsics: [k.columns.0.x * scale, k.columns.1.y * scale, k.columns.2.x * scale, k.columns.2.y * scale],
-                               timestamp: frame.timestamp)
+                               timestamp: frame.timestamp, quality: monitor?.quality)
         depthLog.frames.append(entry)
+        coverage?.add(depth: sceneDepth.depthMap, confidence: sceneDepth.confidenceMap,
+                      intrinsics: k, imageWidth: image, cameraToWorld: frame.camera.transform, photo: false)
         depthCount = depthLog.frames.count
         depthInFlight += 1
         let depthURL = dir.appendingPathComponent(entry.depth)
@@ -195,7 +224,7 @@ final class DetailRecorder: ObservableObject {
                                 imageWidth: CVPixelBufferGetWidth(buffer), imageHeight: CVPixelBufferGetHeight(buffer),
                                 transform: Self.flatten(frame.camera.transform),
                                 intrinsics: [k.columns.0.x, k.columns.1.y, k.columns.2.x, k.columns.2.y],
-                                timestamp: frame.timestamp, turnRate: turnRate)
+                                timestamp: frame.timestamp, turnRate: turnRate, quality: monitor?.quality)
         photoLog.frames.append(keyframe)
         photoCount = photoLog.frames.count
         let image = CIImage(cvPixelBuffer: buffer)

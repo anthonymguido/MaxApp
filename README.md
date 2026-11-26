@@ -75,6 +75,21 @@ same `.ipa`. Your scans are kept.
 6. **View in 3D / AR** to look around. **Share textured model** exports the `.usdz`, which opens in
    Files, Mail and AirDrop, on a Mac, or in Blender (File → Import → Universal Scene Description).
 
+### Keeping tracking (and seeing what's missing)
+- **Edge glow:** green = tracking well, amber = slow down / needs more detail or light, red = tracking lost.
+  The bar on the right fills with your speed; keep it out of the red top band. The phone taps when
+  tracking gets worse.
+- **Recording pauses automatically** while tracking isn't steady, and anything recorded in the second
+  before tracking broke is left out of the build (it may have drifted).
+- **Tracking lost:** a picture of the last good view appears, with which way to turn. Point the phone at
+  that view and hold still until the glow turns green.
+- **Room scan mini-map** (top right): green dots = photos taken, red = where tracking was lost.
+- **Detail pass colours:** the live LiDAR mesh is red where nothing has been captured yet, amber where
+  it's partly captured, green when it's done. The % on the card is how much of what you see is green.
+- **After building**, the house page shows a **Coverage map**. Red floor, red walls and red dots are
+  places no photo saw; ✕ marks where tracking was lost. Tap **Add more detail (fill gaps)** to go back
+  for just those spots, then rebuild.
+
 ### For the best textures
 - **Turn on all the lights** and open the curtains. Even light gives even colors.
 - **Move slowly** and point the phone at **every wall and the floor**. Anything the camera never

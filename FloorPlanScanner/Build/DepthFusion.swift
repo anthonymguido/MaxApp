@@ -13,6 +13,8 @@ enum DepthFusion {
         var note: String
         /// Shift applied to line the detail pass up with the room scan; detail-pass photos need the same shift.
         var offset: SIMD3<Float>
+        /// Where tracking was lost during the detail pass (world, already shifted by `offset`).
+        var lossPositions: [SIMD3<Float>] = []
     }
 
     static func reconstruct(logURL: URL, frameDir: URL, geometry: SurfaceBuilder.Result, room: CapturedRoom,
@@ -36,8 +38,11 @@ enum DepthFusion {
 
         // 1. Fuse.
         let volume = TSDFVolume(voxelSize: 0.02, truncationVoxels: 3)
+        var skippedSuspect = 0, skippedDrift = 0, fusedCount = 0
         for (n, frame) in log.frames.enumerated() {
             if isCancelled() { return nil }
+            // Recorded just before tracking broke: its position may be off.
+            if frame.suspect == true { skippedSuspect += 1; continue }
             guard frame.transform.count == 16, frame.intrinsics.count == 4,
                   let raw = try? Data(contentsOf: frameDir.appendingPathComponent(frame.depth)),
                   raw.count == frame.width * frame.height * 2 else { continue }
@@ -52,6 +57,16 @@ enum DepthFusion {
                                      SIMD4(t[8], t[9], t[10], t[11]), SIMD4(t[12], t[13], t[14], t[15]))
             let cam = TSDFVolume.DepthCamera(fx: frame.intrinsics[0], fy: frame.intrinsics[1],
                                              cx: frame.intrinsics[2], cy: frame.intrinsics[3], cameraToWorld: pose)
+            // Drift check: a frame that disagrees with what's already fused would add a ghost copy.
+            if fusedCount >= 20 {
+                let check = volume.agreement(depthMM: depth, confidence: confidence, width: frame.width,
+                                             height: frame.height, camera: cam, minConfidence: confidence == nil ? 0 : 2)
+                if check.checked >= 80 && Float(check.agreeing) / Float(check.checked) < 0.45 {
+                    skippedDrift += 1
+                    continue
+                }
+            }
+            fusedCount += 1
             volume.integrate(depthMM: depth, confidence: confidence, width: frame.width, height: frame.height,
                              camera: cam, stride: 2, minConfidence: confidence == nil ? 0 : 2, bounds: (lo, hi))
             if n % 20 == 0 {
@@ -167,11 +182,16 @@ enum DepthFusion {
         }
         progress(1, "3D shape ready")
         let mb = volume.memoryBytes / 1_048_576
-        var note = "3D shape fused from \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume)."
+        var note = "3D shape fused from \(fusedCount) of \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume)."
         if offset != .zero {
             note += String(format: " Detail pass lined up with the room scan (moved %.0f cm: %.0f / %.0f / %.0f).",
                            simd_length(offset) * 100, offset.x * 100, offset.y * 100, offset.z * 100)
         }
-        return Result(mesh: mesh, note: note, offset: offset)
+        if skippedSuspect + skippedDrift > 0 {
+            note += " Skipped for tracking problems: \(skippedSuspect) flagged while scanning, \(skippedDrift) that didn't line up."
+        }
+        return Result(mesh: mesh, note: note, offset: offset, lossPositions: (log.losses ?? []).compactMap {
+            $0.count == 3 ? SIMD3($0[0], $0[1], $0[2]) + offset : nil
+        })
     }
 }

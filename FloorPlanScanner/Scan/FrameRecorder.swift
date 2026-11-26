@@ -11,6 +11,10 @@ import simd
 final class FrameRecorder: ObservableObject {
     @Published private(set) var count = 0
     @Published private(set) var depthCount = 0
+    /// Where photos were taken (x, z), for the mini-map.
+    @Published private(set) var photoPositions: [SIMD2<Float>] = []
+    /// When set, photos are only taken while tracking is good and steady.
+    weak var monitor: TrackingMonitor?
 
     static let maxFrames = 800
     /// Keep a new photo after turning this far…
@@ -45,6 +49,7 @@ final class FrameRecorder: ObservableObject {
         log = KeyframeLog()
         count = 0
         depthCount = 0
+        photoPositions = []
         lastKeptPosition = nil
         lastKeptForward = nil
         prevForward = nil
@@ -77,6 +82,7 @@ final class FrameRecorder: ObservableObject {
         prevForward = forward
         prevTime = frame.timestamp
 
+        if let monitor, !monitor.canRecord { return }
         if let lp = lastKeptPosition, let lf = lastKeptForward {
             let turned = Self.degrees(between: lf, forward)
             let moved = simd_distance(lp, position)
@@ -92,6 +98,14 @@ final class FrameRecorder: ObservableObject {
     /// Writes frames.json. Call when the scan is done.
     func finish() {
         writeLog()
+    }
+
+    /// Tracking broke at `time` at `position`: photos from the second before may have drifted, so flag them.
+    func trackingBroke(at time: TimeInterval, position: SIMD3<Float>?) {
+        for i in log.frames.indices where log.frames[i].timestamp > time - 1.0 {
+            log.frames[i].suspect = true
+        }
+        if let p = position { log.losses = (log.losses ?? []) + [[p.x, p.y, p.z]] }
     }
 
     // MARK: Private
@@ -121,6 +135,8 @@ final class FrameRecorder: ObservableObject {
                                 imageWidth: width, imageHeight: height, transform: transform,
                                 intrinsics: [k.columns.0.x, k.columns.1.y, k.columns.2.x, k.columns.2.y],
                                 timestamp: frame.timestamp, turnRate: turnRate)
+        keyframe.quality = monitor?.quality
+        photoPositions.append(SIMD2(t.columns.3.x, t.columns.3.z))
         if let depth {
             keyframe.depth = stem + ".depth"
             keyframe.depthWidth = depth.width

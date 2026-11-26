@@ -29,6 +29,9 @@ final class TextureBaker {
         var coverage: Float
         /// Average color, used when there's no texture.
         var averageColor: SIMD3<Float>
+        /// Per 10 cm cell (row-major, nu × nv): 0 = not part of the surface, 1 = no photo saw it, 2 = seen.
+        var cellSeen: [UInt8] = []
+        var cellGrid: (nu: Int, nv: Int) = (0, 0)
     }
 
     struct Camera {
@@ -92,9 +95,11 @@ final class TextureBaker {
         self.surfaces = surfaces
         self.occluders = surfaces.indices.filter { surfaces[$0].occludes }
         var cams: [Camera] = []
+        var skipped = 0
         for source in sources {
         let framesDir = source.imageDir
         for kf in source.frames {
+            if kf.suspect == true { skipped += 1; continue }   // recorded just before tracking broke
             let url = framesDir.appendingPathComponent(kf.image)
             guard kf.transform.count == 16, kf.intrinsics.count == 4,
                   FileManager.default.fileExists(atPath: url.path) else { continue }
@@ -118,10 +123,13 @@ final class TextureBaker {
         }
         }
         cameras = cams
+        skippedPhotos = skipped
         gains = Array(repeating: SIMD3<Float>(repeating: 1), count: cams.count)
     }
 
     var photoCount: Int { cameras.count }
+    /// Photos left out because tracking broke right after them.
+    private(set) var skippedPhotos = 0
 
     // MARK: Pass 1: choose photos for every cell, and balance brightness between photos
 
@@ -409,6 +417,13 @@ final class TextureBaker {
         let insideCount = inside.filter { $0 }.count
         let seenCount = zip(valid, inside).filter { $0.0 && $0.1 }.count
         let coverage = insideCount > 0 ? Float(seenCount) / Float(insideCount) : 0
+        // Coverage per cell, for the coverage map.
+        var cellIn = [Int](repeating: 0, count: nu * nv), cellOK = [Int](repeating: 0, count: nu * nv)
+        for i in 0..<(tw * th) where inside[i] && texelCell[i] >= 0 {
+            cellIn[Int(texelCell[i])] += 1
+            if valid[i] { cellOK[Int(texelCell[i])] += 1 }
+        }
+        let cellSeen: [UInt8] = (0..<(nu * nv)).map { c in cellIn[c] == 0 ? 0 : (cellOK[c] * 2 >= cellIn[c] ? 2 : 1) }
 
         // Average of what was seen, or the default color.
         var avg = SIMD3<Float>.zero
@@ -418,7 +433,9 @@ final class TextureBaker {
         } else {
             avg = s.defaultColor
         }
-        guard seenCount > 0 else { return BakedSurface(textureURL: nil, coverage: 0, averageColor: avg) }
+        guard seenCount > 0 else {
+            return BakedSurface(textureURL: nil, coverage: 0, averageColor: avg, cellSeen: cellSeen, cellGrid: (nu, nv))
+        }
 
         // Even out color steps where one photo's patch meets the next.
         ViewSelection.levelSeams(color: &color, valid: valid, texelLabel: texelLabel, texelCell: texelCell,
@@ -433,7 +450,8 @@ final class TextureBaker {
 
         let url = directory.appendingPathComponent("\(s.name).jpg")
         let ok = Self.writeJPEG(color, width: tw, height: th, to: url)
-        return BakedSurface(textureURL: ok ? url : nil, coverage: coverage, averageColor: avg)
+        return BakedSurface(textureURL: ok ? url : nil, coverage: coverage, averageColor: avg,
+                            cellSeen: cellSeen, cellGrid: (nu, nv))
     }
 
     /// Color of a texel from one photo: the cell's chosen photo, or the next best one that sees this exact spot.

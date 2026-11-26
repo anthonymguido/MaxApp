@@ -30,6 +30,9 @@ struct HouseDetailView: View {
     @State private var capturing: CaptureTarget?
     @State private var showTips = false
     @State private var showDetailPass = false
+    @State private var detailAppend = false
+    @State private var coverageImage: UIImage?
+    @State private var showCoverage = false
 
     struct ViewTarget: Identifiable {
         let url: URL
@@ -62,7 +65,21 @@ struct HouseDetailView: View {
                 ContentUnavailableView("This scan was deleted", systemImage: "trash")
             }
         }
-        .task(id: store.house(houseID)?.status) { await loadRoom() }
+        .task(id: store.house(houseID)?.status) {
+            await loadRoom()
+            let url = store.coverageURL(for: houseID)
+            coverageImage = await Task.detached(priority: .utility) { UIImage(contentsOfFile: url.path) }.value
+        }
+        .sheet(isPresented: $showCoverage) {
+            NavigationStack {
+                ScrollView([.horizontal, .vertical]) {
+                    if let coverageImage { Image(uiImage: coverageImage).resizable().scaledToFit().frame(minWidth: 360) }
+                }
+                .navigationTitle("Coverage map")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showCoverage = false } } }
+            }
+        }
         .sheet(item: $viewing) { ModelViewer(url: $0.url, title: $0.title) }
         .sheet(isPresented: $sharing) { ShareSheet(items: shareItems) }
         .sheet(isPresented: $showTips) { NavigationStack { TrackingTipsView() } }
@@ -70,7 +87,7 @@ struct HouseDetailView: View {
             RoomScanView(houseID: target.id, isNew: false) { _ in }
         }
         .fullScreenCover(isPresented: $showDetailPass) {
-            DetailPassScreen(houseID: houseID) { showDetailPass = false }
+            DetailPassScreen(houseID: houseID, append: detailAppend) { showDetailPass = false }
         }
         .fullScreenCover(item: $capturing) { target in
             CaptureView(scanID: target.scanID) { scanID in
@@ -149,8 +166,32 @@ struct HouseDetailView: View {
                           systemImage: "paintbrush.pointed")
                 }
                 .disabled(!store.hasRoom(houseID) || builder.isRunning)
+                if let coverageImage {
+                    Button { showCoverage = true } label: {
+                        HStack(spacing: 12) {
+                            Image(uiImage: coverageImage).resizable().scaledToFit().frame(width: 72, height: 72)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Coverage map").font(.headline)
+                                Text("Red shows what no photo saw and ✕ where tracking was lost. Fill gaps with Add more detail.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
                 if store.hasWorldMap(houseID) && DeviceSupport.canScanRooms {
+                    if house.hasDetailPass {
+                        Button {
+                            detailAppend = true
+                            showDetailPass = true
+                        } label: {
+                            Label("Add more detail (fill gaps)", systemImage: "plus.viewfinder")
+                        }
+                        .disabled(builder.isRunning)
+                    }
                     Button {
+                        detailAppend = false
                         showDetailPass = true
                     } label: {
                         Label(house.hasDetailPass ? "Redo detail pass" : "Add detail pass", systemImage: "sparkles")

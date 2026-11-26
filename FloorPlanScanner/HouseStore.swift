@@ -70,6 +70,8 @@ final class HouseStore: ObservableObject {
     func roomModelURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("room.usdz") }
     func modelURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("house.usdz") }
     func planURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("plan.jpg") }
+    /// Top-down map of what was captured, made by each build.
+    func coverageURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("coverage.jpg") }
     // Detail pass.
     func highResURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("HighRes", isDirectory: true) }
     func highResLogURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("highres.json") }
@@ -113,6 +115,7 @@ final class HouseStore: ObservableObject {
             try? fm.removeItem(at: url)
         }
         for url in [frameLogURL(for: id), roomURL(for: id), roomModelURL(for: id), modelURL(for: id), planURL(for: id),
+                    coverageURL(for: id),
                     highResLogURL(for: id), depthFrameLogURL(for: id), worldMapURL(for: id)] {
             try? fm.removeItem(at: url)
         }

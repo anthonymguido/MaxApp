@@ -29,6 +29,8 @@ extension TextureBaker {
         var scale: Float
         /// Share of mesh faces no photo saw at all.
         var unseenShare: Float
+        /// Centres of (a sample of) those faces, for the coverage map.
+        var unseenPoints: [SIMD3<Float>] = []
     }
 
     func textureMesh(_ mesh: ReconMesh, directory: URL, pageSize: Int = 4096, maxPages: Int = 6,
@@ -263,8 +265,10 @@ extension TextureBaker {
                               color: colorCount > 0 ? colorSum / colorCount : SIMD3(repeating: 0.6))
         var unseenFaces = 0
         let unseenStamp = Int32(charts.count)
+        var unseenPoints: [SIMD3<Float>] = []
         for f in 0..<faceCount where labels[f] < 0 {
             unseenFaces += 1
+            if unseenFaces % 4 == 0 { unseenPoints.append(centroids[f]) }
             let (a, b, c) = mesh.triangle(f)
             for v in [a, b, c] {
                 if vertexStamp[v] == unseenStamp {
@@ -281,7 +285,8 @@ extension TextureBaker {
         }
         if !unseen.indices.isEmpty { parts.append(unseen) }
         progress(1, "Mesh textured")
-        return MeshTextureResult(parts: parts, scale: scale, unseenShare: Float(unseenFaces) / Float(faceCount))
+        return MeshTextureResult(parts: parts, scale: scale, unseenShare: Float(unseenFaces) / Float(faceCount),
+                                 unseenPoints: unseenPoints)
     }
 
     // MARK: Helpers

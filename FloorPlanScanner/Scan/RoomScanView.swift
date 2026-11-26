@@ -111,6 +111,7 @@ struct RoomScanView: View {
     @StateObject private var controller = RoomScanController()
     @StateObject private var coach = ScanCoach()
     @StateObject private var recorder = FrameRecorder()
+    @StateObject private var monitor = TrackingMonitor()
     @State private var introDone: Bool
     @State private var saving = false
     @State private var saveError: String?
@@ -146,11 +147,24 @@ struct RoomScanView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(detailStage == .none)
 
+                if isScanning {
+                    TrackingHUD(monitor: monitor, showsMessage: false)
+                }
+
                 if detailStage == .intro {
                     detailIntroLayer
                 } else {
                 VStack(spacing: 10) {
                     topBar
+                    if isScanning && !recorder.photoPositions.isEmpty {
+                        HStack {
+                            Spacer()
+                            ScanMiniMap(photoPositions: recorder.photoPositions,
+                                        lossPositions: monitor.lossPositions.map { SIMD2($0.x, $0.z) },
+                                        current: monitor.mapPosition, heading: monitor.mapHeading)
+                                .frame(width: 110, height: 110)
+                        }
+                    }
                     if isScanning, let warning = coach.warning {
                         CoachBanner(message: warning)
                     } else if isScanning, recorder.nearLimit {
@@ -172,7 +186,10 @@ struct RoomScanView: View {
                 if isScanning { coach.tick(session: controller.arSession) }
             }
             .onReceive(photoTicker) { _ in
-                if isScanning { recorder.tick(session: controller.arSession) }
+                if isScanning {
+                    monitor.tick(session: controller.arSession)
+                    recorder.tick(session: controller.arSession)
+                }
             }
         }
     }
@@ -292,6 +309,11 @@ struct RoomScanView: View {
     // MARK: Actions
 
     private func beginRecording() {
+        monitor.reset()
+        recorder.monitor = monitor
+        monitor.onTrackingBreak = { [weak recorder, weak monitor] time in
+            recorder?.trackingBroke(at: time, position: monitor?.lossPositions.last)
+        }
         recorder.begin(framesDir: store.framesURL(for: houseID),
                        depthDir: store.depthURL(for: houseID),
                        logURL: store.frameLogURL(for: houseID))

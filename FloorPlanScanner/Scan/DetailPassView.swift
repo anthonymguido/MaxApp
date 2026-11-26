@@ -1,22 +1,5 @@
 import ARKit
-import RealityKit
 import SwiftUI
-
-/// Camera view for the detail pass, on the same AR session the RoomPlan scan used.
-/// The live LiDAR mesh is drawn over the camera so you can see what has been captured.
-struct DetailARView: UIViewRepresentable {
-    let session: ARSession
-
-    func makeUIView(context: Context) -> ARView {
-        let view = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
-        view.session = session
-        view.debugOptions.insert(.showSceneUnderstanding)
-        view.renderOptions.insert(.disableMotionBlur)
-        return view
-    }
-
-    func updateUIView(_ uiView: ARView, context: Context) {}
-}
 
 /// Before the detail pass: what it's for and how to do it.
 struct DetailIntroCard: View {
@@ -115,11 +98,16 @@ final class DetailSession: ObservableObject {
 /// Used right after the room scan and from the house page (Add detail pass).
 struct DetailPassScreen: View {
     let houseID: UUID
+    /// Add to an earlier detail pass instead of replacing it.
+    var append = false
     var onDone: () -> Void
 
     @EnvironmentObject private var store: HouseStore
     @StateObject private var session = DetailSession()
     @StateObject private var recorder = DetailRecorder()
+    @StateObject private var monitor = TrackingMonitor()
+    @State private var grid = CoverageGrid()
+    @State private var coverage: Float?
     @State private var started = Date()
     @State private var elapsed = 0
     @State private var confirmCancel = false
@@ -128,7 +116,13 @@ struct DetailPassScreen: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            DetailARView(session: session.arSession).ignoresSafeArea()
+            CoverageARView(session: session.arSession, grid: grid) { value in
+                DispatchQueue.main.async { coverage = value }
+            }
+            .ignoresSafeArea()
+            if session.status == .recording {
+                TrackingHUD(monitor: monitor)
+            }
             VStack {
                 HStack {
                     Button("Cancel") {
@@ -139,7 +133,8 @@ struct DetailPassScreen: View {
                 }
                 .environment(\.colorScheme, .dark)
                 Spacer()
-                DetailPassCard(recorder: recorder, status: session.status, elapsed: elapsed) { close(save: true) }
+                DetailPassCard(recorder: recorder, status: session.status, elapsed: elapsed, coverage: coverage,
+                               trackingGood: monitor.canRecord) { close(save: true) }
             }
             .padding()
         }
@@ -148,7 +143,10 @@ struct DetailPassScreen: View {
         .onDisappear { session.stop() }
         .onReceive(ticker) { _ in
             session.tick()
-            if session.status == .recording { recorder.tick(session: session.arSession) }
+            if session.status == .recording {
+                monitor.tick(session: session.arSession)
+                recorder.tick(session: session.arSession)
+            }
             elapsed = Int(Date().timeIntervalSince(started))
         }
         .confirmationDialog("Stop without saving the detail pass?", isPresented: $confirmCancel, titleVisibility: .visible) {
@@ -161,8 +159,14 @@ struct DetailPassScreen: View {
             close(save: false)
             return
         }
+        recorder.monitor = monitor
+        recorder.coverage = grid
+        monitor.onTrackingBreak = { [weak recorder, weak monitor] time in
+            recorder?.trackingBroke(at: time, position: monitor?.lossPositions.last)
+        }
         recorder.begin(photoDir: store.highResURL(for: houseID), depthDir: store.depthFramesURL(for: houseID),
-                       photoLogURL: store.highResLogURL(for: houseID), depthLogURL: store.depthFrameLogURL(for: houseID))
+                       photoLogURL: store.highResLogURL(for: houseID), depthLogURL: store.depthFrameLogURL(for: houseID),
+                       append: append)
         started = Date()
         session.start(worldMap: map)
     }
@@ -187,6 +191,9 @@ struct DetailPassCard: View {
     @ObservedObject var recorder: DetailRecorder
     var status: DetailSession.Status
     var elapsed: Int
+    /// Share of the visible LiDAR mesh that is well covered.
+    var coverage: Float?
+    var trackingGood = true
     var onFinish: () -> Void
 
     private static let tips = [
@@ -204,6 +211,11 @@ struct DetailPassCard: View {
                 Label("\(recorder.depthCount)", systemImage: "cube.transparent")
                 Label(String(format: "%d:%02d", elapsed / 60, elapsed % 60), systemImage: "timer")
                 Spacer()
+                if let coverage {
+                    Label("\(Int(coverage * 100))%", systemImage: "checkmark.seal")
+                        .foregroundStyle(coverage > 0.8 ? .green : (coverage > 0.5 ? .orange : .red))
+                        .accessibilityLabel("\(Int(coverage * 100)) percent covered")
+                }
             }
             .font(.subheadline.weight(.semibold).monospacedDigit())
             statusLine
@@ -234,11 +246,15 @@ struct DetailPassCard: View {
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(.orange)
         case .recording:
-            if recorder.photosFull {
+            if !trackingGood {
+                Label("Paused until tracking is steady again.", systemImage: "pause.circle")
+                    .font(.footnote).foregroundStyle(.orange)
+            } else if recorder.photosFull {
                 Label("Photo limit reached. Depth is still being captured.", systemImage: "photo.stack")
                     .font(.footnote).foregroundStyle(.yellow)
             } else {
-                Label(Self.tips[(elapsed / 8) % Self.tips.count], systemImage: "checkmark.circle")
+                Label(elapsed % 16 < 8 ? "Make the red parts green: point at them from a metre or two away."
+                                       : Self.tips[(elapsed / 16) % Self.tips.count], systemImage: "checkmark.circle")
                     .font(.footnote)
             }
         }

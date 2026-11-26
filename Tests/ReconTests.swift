@@ -54,6 +54,31 @@ final class ReconTests: XCTestCase {
         XCTAssertLessThan(meanError, 0.012)
     }
 
+    /// A depth frame that lines up with the fused volume agrees; one whose pose drifted 10 cm is caught.
+    func testAgreementCatchesDriftedFrame() {
+        let volume = TSDFVolume(voxelSize: 0.02, truncationVoxels: 3)
+        let w = 128, h = 96
+        let depth = [UInt16](repeating: 2000, count: w * h)
+        func camera(_ shift: SIMD3<Float>) -> TSDFVolume.DepthCamera {
+            var pose = matrix_identity_float4x4
+            pose.columns.3 = SIMD4(shift, 1)
+            return TSDFVolume.DepthCamera(fx: 100, fy: 100, cx: 64, cy: 48, cameraToWorld: pose)
+        }
+        for k in 0..<5 {
+            volume.integrate(depthMM: depth, confidence: nil, width: w, height: h,
+                             camera: camera(SIMD3(Float(k) * 0.02, 0, 0)), stride: 1, minConfidence: 0)
+        }
+        let good = volume.agreement(depthMM: depth, confidence: nil, width: w, height: h,
+                                    camera: camera(SIMD3(0.05, 0, 0)), minConfidence: 0)
+        let drifted = volume.agreement(depthMM: depth, confidence: nil, width: w, height: h,
+                                       camera: camera(SIMD3(0.05, 0, 0.10)), minConfidence: 0)
+        XCTAssertGreaterThan(good.checked, 100)
+        XCTAssertGreaterThan(Float(good.agreeing) / Float(good.checked), 0.8)
+        if drifted.checked > 0 {
+            XCTAssertLessThan(Float(drifted.agreeing) / Float(drifted.checked), 0.3)
+        }
+    }
+
     // MARK: Simplification
 
     func testSimplifierKeepsCubeShape() {

@@ -22,6 +22,7 @@ enum HouseModelBuilder {
         var highResLogURL: URL
         var depthFramesDir: URL
         var depthFrameLogURL: URL
+        var coverageURL: URL
         var outputURL: URL
         var includeCeilings: Bool
         var details: [DetailModel]
@@ -56,9 +57,11 @@ enum HouseModelBuilder {
             throw BuildError.noRoom(error.localizedDescription)
         }
         let frames: [Keyframe]
+        var roomScanLosses: [SIMD3<Float>] = []
         if let data = try? Data(contentsOf: input.frameLogURL),
            let log = try? JSONDecoder().decode(KeyframeLog.self, from: data) {
             frames = log.frames
+            roomScanLosses = (log.losses ?? []).compactMap { $0.count == 3 ? SIMD3($0[0], $0[1], $0[2]) : nil }
         } else {
             frames = []
         }
@@ -149,12 +152,14 @@ enum HouseModelBuilder {
         // 3b. Texture the fused mesh from the photos (one sharp photo per face, packed into atlases).
         var meshParts: [TextureBaker.MeshPart] = []
         var meshNote: String?
+        var unseenMeshPoints: [SIMD3<Float>] = []
         if let fused {
             let start = p0 + bakeShare
             let result = baker.textureMesh(fused.mesh, directory: input.texturesDir,
                                            progress: { progress(start + (0.92 - start) * $0, $1) },
                                            isCancelled: isCancelled)
             meshParts = result.parts
+            unseenMeshPoints = result.unseenPoints
             meshNote = String(format: "3D shape textures at %.0f%% of photo resolution; %.0f%% of it seen by no photo.",
                               result.scale * 100, result.unseenShare * 100)
         }
@@ -230,6 +235,13 @@ enum HouseModelBuilder {
             placed += 1
         }
 
+        // 5b. Coverage map for the house page: what was photographed, what wasn't, where tracking was lost.
+        _ = CoverageMapRenderer.render(CoverageMapRenderer.Input(
+            surfaces: geometry.surfaces, baked: baked, cellSize: 0.10,
+            unseenMeshPoints: unseenMeshPoints,
+            photoPositions: baker.cameras.map(\.position),
+            lossPositions: roomScanLosses + (fused?.lossPositions ?? [])), to: input.coverageURL)
+
         // 6. Write the USDZ.
         progress(0.96, "Saving the 3D model…")
         try? fm.removeItem(at: input.outputURL)
@@ -247,6 +259,9 @@ enum HouseModelBuilder {
         if let fused { lines.append(fused.note) }
         if let refineNote { lines.append(refineNote) }
         if let meshNote { lines.append(meshNote) }
+        if baker.skippedPhotos > 0 {
+            lines.append("\(baker.skippedPhotos) photos left out because tracking broke right after them.")
+        }
         if !usable.isEmpty {
             lines.append("\(placed) detailed piece\(placed == 1 ? "" : "s") of furniture placed.")
         }
