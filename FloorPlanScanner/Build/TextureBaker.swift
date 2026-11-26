@@ -672,7 +672,10 @@ final class TextureBaker {
             for x in -r...r { acc += src[y * w + min(max(x, 0), w - 1)] }
             for x in 0..<w {
                 tmp[y * w + x] = acc / Float(2 * r + 1)
-                acc += src[y * w + min(x + r + 1, w - 1)] - src[y * w + max(x - r, 0)]
+                let addIndex: Int = y * w + min(x + r + 1, w - 1)
+                let subIndex: Int = y * w + max(x - r, 0)
+                let delta: SIMD3<Float> = src[addIndex] - src[subIndex]
+                acc += delta
             }
         }
         for x in 0..<w {
@@ -680,7 +683,10 @@ final class TextureBaker {
             for y in -r...r { acc += tmp[min(max(y, 0), h - 1) * w + x] }
             for y in 0..<h {
                 out[y * w + x] = acc / Float(2 * r + 1)
-                acc += tmp[min(y + r + 1, h - 1) * w + x] - tmp[max(y - r, 0) * w + x]
+                let addIndex: Int = min(y + r + 1, h - 1) * w + x
+                let subIndex: Int = max(y - r, 0) * w + x
+                let delta: SIMD3<Float> = tmp[addIndex] - tmp[subIndex]
+                acc += delta
             }
         }
         return out
