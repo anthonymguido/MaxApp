@@ -1,5 +1,7 @@
 import XCTest
+import UIKit
 import SceneKit
+import SceneKit.ModelIO
 import ModelIO
 import ImageIO
 import UniformTypeIdentifiers

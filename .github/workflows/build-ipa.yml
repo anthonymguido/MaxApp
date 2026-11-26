@@ -41,6 +41,8 @@ jobs:
           xcodebuild test -project FloorPlanScanner.xcodeproj -scheme ReconTests -destination "id=$UDID" \
             CODE_SIGNING_ALLOWED=NO > test.log 2>&1 || status=$?
           tail -40 test.log
+          echo "---- errors ----"
+          grep -E "error:" test.log | sort -u | head -20 || true
           echo "---- experiments ----"
           grep "EXPERIMENT" test.log || true
           exit ${status:-0}
