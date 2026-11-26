@@ -33,7 +33,9 @@ final class BuildController: ObservableObject {
         }
         let input = HouseModelBuilder.Input(roomURL: store.roomURL(for: id), frameLogURL: store.frameLogURL(for: id),
                                             framesDir: store.framesURL(for: id), depthDir: store.depthURL(for: id),
-                                            texturesDir: store.texturesURL(for: id), outputURL: store.modelURL(for: id),
+                                            texturesDir: store.texturesURL(for: id),
+                                            highResDir: store.highResURL(for: id), highResLogURL: store.highResLogURL(for: id),
+                                            outputURL: store.modelURL(for: id),
                                             includeCeilings: house.includeCeilings, details: details)
         let flag = CancelFlag()
         self.flag = flag

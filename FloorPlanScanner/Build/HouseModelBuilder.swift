@@ -18,6 +18,8 @@ enum HouseModelBuilder {
         var framesDir: URL
         var depthDir: URL
         var texturesDir: URL
+        var highResDir: URL
+        var highResLogURL: URL
         var outputURL: URL
         var includeCeilings: Bool
         var details: [DetailModel]
@@ -68,8 +70,15 @@ enum HouseModelBuilder {
         // 2. Choose photos for each spot and balance their brightness.
         try? fm.removeItem(at: input.texturesDir)
         try fm.createDirectory(at: input.texturesDir, withIntermediateDirectories: true)
-        let baker = TextureBaker(surfaces: geometry.surfaces, frames: frames,
-                                 framesDir: input.framesDir, depthDir: input.depthDir)
+        var sources = [TextureBaker.PhotoSource(frames: frames, imageDir: input.framesDir, depthDir: input.depthDir,
+                                                decodeSize: 960)]
+        if let data = try? Data(contentsOf: input.highResLogURL),
+           let log = try? JSONDecoder().decode(KeyframeLog.self, from: data), !log.frames.isEmpty {
+            // 12 MP stills from the detail pass: decoded at up to 2048 px for sharper textures.
+            sources.append(TextureBaker.PhotoSource(frames: log.frames, imageDir: input.highResDir, depthDir: nil,
+                                                    decodeSize: 2048))
+        }
+        let baker = TextureBaker(surfaces: geometry.surfaces, sources: sources)
         progress(0.02, "Matching \(baker.photoCount) photos to walls and floors…")
         baker.prepare(progress: { progress(0.02 + 0.28 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
                       isCancelled: isCancelled)
@@ -157,7 +166,7 @@ enum HouseModelBuilder {
 
         var lines: [String] = []
         let pct = coverageCount > 0 ? Int((coverageSum / coverageCount * 100).rounded()) : 0
-        if frames.isEmpty {
+        if baker.photoCount == 0 {
             lines.append("No photos were recorded during the scan, so walls and floors have plain colors.")
         } else {
             lines.append("Built from \(baker.photoCount) photos. Photos covered about \(pct)% of the walls and floors; the rest is filled with nearby colors.")

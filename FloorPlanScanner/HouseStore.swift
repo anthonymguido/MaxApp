@@ -69,6 +69,11 @@ final class HouseStore: ObservableObject {
     func roomModelURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("room.usdz") }
     func modelURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("house.usdz") }
     func planURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("plan.jpg") }
+    // Detail pass.
+    func highResURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("HighRes", isDirectory: true) }
+    func highResLogURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("highres.json") }
+    func depthFramesURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("DepthFrames", isDirectory: true) }
+    func depthFrameLogURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("depthframes.json") }
 
     func hasRoom(_ id: UUID) -> Bool { fm.fileExists(atPath: roomURL(for: id).path) }
     func hasModel(_ id: UUID) -> Bool { fm.fileExists(atPath: modelURL(for: id).path) }
@@ -82,10 +87,11 @@ final class HouseStore: ObservableObject {
 
     /// Removes photos, depth and model files from an earlier scan of this house, before scanning again.
     func clearScanData(for id: UUID) {
-        for url in [framesURL(for: id), depthURL(for: id), texturesURL(for: id)] {
+        for url in [framesURL(for: id), depthURL(for: id), texturesURL(for: id), highResURL(for: id), depthFramesURL(for: id)] {
             try? fm.removeItem(at: url)
         }
-        for url in [frameLogURL(for: id), roomURL(for: id), roomModelURL(for: id), modelURL(for: id), planURL(for: id)] {
+        for url in [frameLogURL(for: id), roomURL(for: id), roomModelURL(for: id), modelURL(for: id), planURL(for: id),
+                    highResLogURL(for: id), depthFrameLogURL(for: id)] {
             try? fm.removeItem(at: url)
         }
         try? fm.createDirectory(at: framesURL(for: id), withIntermediateDirectories: true)

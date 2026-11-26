@@ -6,10 +6,10 @@ import simd
 
 /// Projects the keyframes recorded during the scan onto each planar surface and writes one texture per surface.
 ///
-/// For every 10 cm cell of a surface it picks the 3 best photos that actually see that spot (facing it,
-/// close, sharp, not hidden behind another wall or piece of furniture). Every texel then blends those photos
-/// (and the neighbouring cells' photos, so there are no hard seams), with a per-photo brightness
-/// correction so auto-exposure differences don't show as patches.
+/// For every 10 cm cell of a surface it finds the photos that actually see that spot (facing it, close, sharp,
+/// not hidden behind another wall or piece of furniture), then picks ONE photo per cell with MRF view selection,
+/// so textures stay sharp. Seams between photo patches are leveled, and every photo gets a brightness and
+/// white-balance correction so auto-exposure differences don't show as patches.
 final class TextureBaker {
     struct Options {
         /// Finest texture detail, metres per texel.
@@ -18,10 +18,8 @@ final class TextureBaker {
         var cellSize: Float = 0.10
         /// Candidate photos kept per cell for view selection.
         var photosPerCell = 5
-        /// Longest edge of the photos when decoded for baking (they're ~1920 px; 640 is still finer than 1 cm at room distances).
-        var decodeSize = 960
-        /// Photos kept decoded at once (each is about 1.2 MB at 640 px).
-        var cacheCapacity = 110
+        /// Memory budget for decoded photos.
+        var cacheBytes = 420 * 1024 * 1024
         var maxDistance: Float = 7
     }
 
@@ -43,6 +41,8 @@ final class TextureBaker {
         let fx: Float, fy: Float, cx: Float, cy: Float
         let width: Float, height: Float
         let sharpness: Float
+        let decodeSize: Int
+        let resolution: Float
     }
 
     private struct DecodedImage {
@@ -52,6 +52,7 @@ final class TextureBaker {
         let depth: [UInt16]?
         let depthWidth: Int
         let depthHeight: Int
+        var byteCount: Int { pixels.count + (depth?.count ?? 0) * 2 }
     }
 
     private struct Candidate {
@@ -64,6 +65,7 @@ final class TextureBaker {
     private let surfaces: [PlanarSurface]
     private let occluders: [Int]
     private var cache: [Int: DecodedImage] = [:]
+    private var cacheUsed = 0
     private var cacheOrder: [Int] = []
     /// Per-photo brightness and white-balance correction (red, green, blue gains).
     private var gains: [SIMD3<Float>]
@@ -73,12 +75,23 @@ final class TextureBaker {
     /// Per-surface photo chosen for each cell (view selection), -1 = none.
     private var labels: [[Int32]] = []
 
-    init(surfaces: [PlanarSurface], frames: [Keyframe], framesDir: URL, depthDir: URL, options: Options = Options()) {
+    /// A set of photos: the scan's keyframes (1920 px) or the detail pass's 12 MP stills.
+    struct PhotoSource {
+        var frames: [Keyframe]
+        var imageDir: URL
+        var depthDir: URL?
+        /// Longest edge when decoded for baking.
+        var decodeSize: Int
+    }
+
+    init(surfaces: [PlanarSurface], sources: [PhotoSource], options: Options = Options()) {
         self.options = options
         self.surfaces = surfaces
         self.occluders = surfaces.indices.filter { surfaces[$0].occludes }
         var cams: [Camera] = []
-        for kf in frames {
+        for source in sources {
+        let framesDir = source.imageDir
+        for kf in source.frames {
             let url = framesDir.appendingPathComponent(kf.image)
             guard kf.transform.count == 16, kf.intrinsics.count == 4,
                   FileManager.default.fileExists(atPath: url.path) else { continue }
@@ -86,7 +99,7 @@ final class TextureBaker {
             let m = simd_float4x4(SIMD4(t[0], t[1], t[2], t[3]), SIMD4(t[4], t[5], t[6], t[7]),
                                   SIMD4(t[8], t[9], t[10], t[11]), SIMD4(t[12], t[13], t[14], t[15]))
             var depthURL: URL?
-            if let d = kf.depth, kf.depthWidth != nil {
+            if let d = kf.depth, kf.depthWidth != nil, let depthDir = source.depthDir {
                 let u = depthDir.appendingPathComponent(d)
                 if FileManager.default.fileExists(atPath: u.path) { depthURL = u }
             }
@@ -95,7 +108,11 @@ final class TextureBaker {
                                position: SIMD3(t[12], t[13], t[14]), worldToCamera: m.inverse,
                                fx: kf.intrinsics[0], fy: kf.intrinsics[1], cx: kf.intrinsics[2], cy: kf.intrinsics[3],
                                width: Float(kf.imageWidth), height: Float(kf.imageHeight),
-                               sharpness: 1 / (1 + kf.turnRate / 25)))
+                               sharpness: 1 / (1 + kf.turnRate / 25),
+                               decodeSize: source.decodeSize,
+                               // More decoded pixels = more detail: prefer the 12 MP stills where they see a spot.
+                               resolution: min(2.5, Float(min(source.decodeSize, max(kf.imageWidth, kf.imageHeight))) / 960)))
+        }
         }
         cameras = cams
         gains = Array(repeating: SIMD3<Float>(repeating: 1), count: cams.count)
@@ -198,7 +215,7 @@ final class TextureBaker {
         let ex = min(px.x, cam.width - px.x) / (cam.width * 0.5)
         let ey = min(px.y, cam.height - px.y) / (cam.height * 0.5)
         let edge = min(1, min(ex, ey) * 3)
-        return facing * facing * edge * cam.sharpness / (dist * dist + 0.3)
+        return facing * facing * edge * cam.sharpness * cam.resolution / (dist * dist + 0.3)
     }
 
     /// Pixel position (x, y) and depth along the camera axis, or nil if outside the photo.
@@ -479,12 +496,14 @@ final class TextureBaker {
             return hit
         }
         guard let img = decode(cameras[ci]) else { return nil }
-        while cache.count >= options.cacheCapacity,
+        while cacheUsed + img.byteCount > options.cacheBytes,
               let k = cacheOrder.firstIndex(where: { !protecting.contains($0) }) {
+            cacheUsed -= cache[cacheOrder[k]]?.byteCount ?? 0
             cache[cacheOrder[k]] = nil
             cacheOrder.remove(at: k)
         }
         cache[ci] = img
+        cacheUsed += img.byteCount
         cacheOrder.append(ci)
         return img
     }
@@ -492,13 +511,14 @@ final class TextureBaker {
     func releaseCache() {
         cache.removeAll()
         cacheOrder.removeAll()
+        cacheUsed = 0
     }
 
     private func decode(_ cam: Camera) -> DecodedImage? {
         guard let source = CGImageSourceCreateWithURL(cam.imageURL as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: options.decodeSize,
+            kCGImageSourceThumbnailMaxPixelSize: cam.decodeSize,
             kCGImageSourceCreateThumbnailWithTransform: false,
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) else { return nil }

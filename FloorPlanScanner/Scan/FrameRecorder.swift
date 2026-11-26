@@ -164,12 +164,12 @@ final class FrameRecorder: ObservableObject {
         }
     }
 
-    private static func degrees(between a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
+    static func degrees(between a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
         acos(min(1, max(-1, simd_dot(a, b)))) * 180 / .pi
     }
 
     /// Float32 metres → UInt16 millimetres (0 = unknown), row-major.
-    private static func depthMillimetres(_ buffer: CVPixelBuffer) -> (data: Data, width: Int, height: Int)? {
+    static func depthMillimetres(_ buffer: CVPixelBuffer) -> (data: Data, width: Int, height: Int)? {
         guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32 else { return nil }
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }

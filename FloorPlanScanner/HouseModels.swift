@@ -63,6 +63,10 @@ struct House: Identifiable, Codable, Hashable {
     var windowCount = 0
     var objectCount = 0
     var includeCeilings = false
+    /// Detail pass: 12 MP photos and LiDAR depth frames recorded after the RoomPlan scan.
+    var hasDetailPass = false
+    var highResCount = 0
+    var depthFrameCount = 0
     var details: [FurnitureDetail] = []
     var errorMessage: String?
     /// Something to know about the last build, shown on the house page.
@@ -86,6 +90,9 @@ struct House: Identifiable, Codable, Hashable {
         windowCount = try c.decodeIfPresent(Int.self, forKey: .windowCount) ?? 0
         objectCount = try c.decodeIfPresent(Int.self, forKey: .objectCount) ?? 0
         includeCeilings = try c.decodeIfPresent(Bool.self, forKey: .includeCeilings) ?? false
+        hasDetailPass = try c.decodeIfPresent(Bool.self, forKey: .hasDetailPass) ?? false
+        highResCount = try c.decodeIfPresent(Int.self, forKey: .highResCount) ?? 0
+        depthFrameCount = try c.decodeIfPresent(Int.self, forKey: .depthFrameCount) ?? 0
         details = (try? c.decodeIfPresent([FurnitureDetail].self, forKey: .details)) ?? []
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         buildNote = try c.decodeIfPresent(String.self, forKey: .buildNote)

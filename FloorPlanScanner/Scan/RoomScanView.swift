@@ -34,7 +34,8 @@ final class RoomScanController: NSObject, ObservableObject, RoomCaptureViewDeleg
 
     @MainActor func finish() {
         phase = .processing
-        captureView?.captureSession.stop()
+        // Keep the AR session running, so the detail pass continues in the same world coordinates.
+        captureView?.captureSession.stop(pauseARSession: false)
     }
 
     @MainActor func rescan() {
@@ -93,6 +94,13 @@ struct RoomScanView: View {
     @State private var introDone: Bool
     @State private var saving = false
     @State private var saveError: String?
+    @StateObject private var detail = DetailRecorder()
+    @State private var detailStage: DetailStage = .none
+    @State private var detailSession: ARSession?
+    @State private var detailStarted = Date()
+    @State private var detailElapsed = 0
+
+    private enum DetailStage { case none, intro, recording }
     private let ticker = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
     private let photoTicker = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
@@ -116,7 +124,12 @@ struct RoomScanView: View {
                 RoomCaptureRepresentable(controller: controller)
                     .id(controller.generation)
                     .ignoresSafeArea()
+                    .opacity(detailStage == .none ? 1 : 0)
+                    .allowsHitTesting(detailStage == .none)
 
+                if detailStage != .none {
+                    detailLayer
+                } else {
                 VStack(spacing: 10) {
                     topBar
                     if isScanning, let warning = coach.warning {
@@ -133,15 +146,66 @@ struct RoomScanView: View {
                 }
                 .padding()
                 .animation(.easeInOut(duration: 0.25), value: coach.warning)
+                }
             }
             .onAppear { beginRecording() }
             .onReceive(ticker) { _ in
                 if isScanning { coach.tick(session: controller.arSession) }
+                if detailStage == .recording { detailElapsed = Int(Date().timeIntervalSince(detailStarted)) }
             }
             .onReceive(photoTicker) { _ in
                 if isScanning { recorder.tick(session: controller.arSession) }
+                if detailStage == .recording { detail.tick(session: detailSession) }
             }
         }
+    }
+
+    // MARK: Detail pass
+
+    @ViewBuilder
+    private var detailLayer: some View {
+        if detailStage == .recording, let session = detailSession {
+            DetailARView(session: session).ignoresSafeArea()
+        } else {
+            Color.black.opacity(0.4).ignoresSafeArea()
+        }
+        VStack {
+            Spacer()
+            if detailStage == .intro {
+                DetailIntroCard(onStart: startDetail, onSkip: { finishAll(withDetail: false) })
+            } else {
+                DetailPassCard(recorder: detail, elapsed: detailElapsed) { finishAll(withDetail: true) }
+            }
+        }
+        .padding()
+    }
+
+    private func startDetail() {
+        guard let session = detailSession else {
+            finishAll(withDetail: false)
+            return
+        }
+        DetailRecorder.configure(session)
+        detail.begin(photoDir: store.highResURL(for: houseID), depthDir: store.depthFramesURL(for: houseID),
+                     photoLogURL: store.highResLogURL(for: houseID), depthLogURL: store.depthFrameLogURL(for: houseID))
+        detailStarted = Date()
+        detailElapsed = 0
+        detailStage = .recording
+    }
+
+    private func finishAll(withDetail: Bool) {
+        if withDetail && detailStage == .recording {
+            detail.finish()
+            let photos = detail.photoCount, depths = detail.depthCount
+            store.mutate(houseID) {
+                $0.highResCount = photos
+                $0.depthFrameCount = depths
+                $0.hasDetailPass = photos > 0 || depths > 0
+            }
+        }
+        detailSession?.pause()
+        onFinish(houseID)
+        dismiss()
     }
 
     private var topBar: some View {
@@ -285,8 +349,10 @@ struct RoomScanView: View {
                 $0.windowCount = room.windows.count
                 $0.objectCount = room.objects.count
             }
-            onFinish(id)
-            dismiss()
+            saving = false
+            // Same AR session, still tracking: offer the detail pass.
+            detailSession = controller.arSession
+            detailStage = .intro
         }
     }
 

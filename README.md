@@ -63,9 +63,13 @@ same `.ipa`. Your scans are kept.
    through the doorway to the next room. The camera counter at the top shows how many photos have
    been recorded for the textures. Banners tell you if you're going too fast or it's too dark.
 3. Tap **Done** → check the summary → **Use this scan**.
-4. On the house page tap **Build textured house**. Keep the app open. It takes a minute or two for a
+4. **Detail pass** (recommended): tap **Start detail pass** and walk through again for 1–2 minutes per
+   room. The LiDAR mesh drawn over the camera shows what's been captured. Sweep furniture from high,
+   middle and low, get close to shelves, and cover the whole floor. The app takes sharp 12-megapixel
+   photos and records LiDAR depth as you go. Tap **Finish** when done, or **Skip**.
+5. On the house page tap **Build textured house**. Keep the app open. It takes a minute or two for a
    small flat, longer for a big house.
-5. **View in 3D / AR** to look around. **Share textured model** exports the `.usdz`, which opens in
+6. **View in 3D / AR** to look around. **Share textured model** exports the `.usdz`, which opens in
    Files, Mail and AirDrop, on a Mac, or in Blender (File → Import → Universal Scene Description).
 
 ### For the best textures

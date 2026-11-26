@@ -107,6 +107,12 @@ struct HouseDetailView: View {
             Text("\(house.frameCount) photos" + (house.frameCount > 0 && house.depthCount == 0 ? " (no LiDAR depth: hiding behind furniture is worked out from the plan instead)" : ""))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            if house.hasDetailPass {
+                Label("Detail pass: \(house.highResCount) sharp photos, \(house.depthFrameCount) depth frames",
+                      systemImage: "sparkles")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
             if let error = house.errorMessage {
                 Text(error).font(.footnote).foregroundStyle(.orange)
             }
