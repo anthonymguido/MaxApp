@@ -148,6 +148,20 @@ enum Geometry2D {
         return out
     }
 
+    /// 0 inside the polygon, otherwise the distance to its nearest edge.
+    static func distanceToPolygon(_ p: SIMD2<Float>, _ poly: [SIMD2<Float>]) -> Float {
+        if pointInPolygon(p, poly) { return 0 }
+        var best = Float.greatestFiniteMagnitude
+        for i in poly.indices {
+            let a = poly[i], b = poly[(i + 1) % poly.count]
+            let ab = b - a
+            let len2 = simd_length_squared(ab)
+            let t = len2 > 0 ? min(1, max(0, simd_dot(p - a, ab) / len2)) : 0
+            best = min(best, simd_distance(p, a + ab * t))
+        }
+        return best
+    }
+
     /// Convex hull (monotone chain), counter-clockwise.
     static func convexHull(_ points: [SIMD2<Float>]) -> [SIMD2<Float>] {
         let pts = points.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }

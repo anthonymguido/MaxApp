@@ -23,10 +23,19 @@ extension TextureBaker {
         var color: SIMD3<Float>
     }
 
-    func textureMesh(_ mesh: ReconMesh, directory: URL, pageSize: Int = 4096, maxPages: Int = 4,
-                     progress: (Double, String) -> Void, isCancelled: () -> Bool) -> [MeshPart] {
+    struct MeshTextureResult {
+        var parts: [MeshPart]
+        /// Texture resolution relative to the decoded photos (1 = full; lower if the atlas budget forced scaling).
+        var scale: Float
+        /// Share of mesh faces no photo saw at all.
+        var unseenShare: Float
+    }
+
+    func textureMesh(_ mesh: ReconMesh, directory: URL, pageSize: Int = 4096, maxPages: Int = 6,
+                     progress: (Double, String) -> Void, isCancelled: () -> Bool) -> MeshTextureResult {
+        let empty = MeshTextureResult(parts: [], scale: 0, unseenShare: 1)
         let faceCount = mesh.triangleCount
-        guard faceCount > 0 else { return [] }
+        guard faceCount > 0 else { return empty }
         let normals = mesh.vertexNormals()
         let faceNormals = (0..<faceCount).map { mesh.faceNormal($0) }
         let centroids: [SIMD3<Float>] = (0..<faceCount).map { t in
@@ -44,12 +53,14 @@ extension TextureBaker {
         // 2. Candidate photos per face, from per-photo z-buffers (in chunks to bound memory).
         let keep = 6
         var candidates = [[(Int32, Float)]](repeating: [], count: faceCount)
+        // Fallback views for faces no photo sees clearly (looser angle and occlusion tests), used only for those.
+        var relaxed = [[(Int32, Float)]](repeating: [], count: faceCount)
         let chunk = 24
         var start = 0
         while start < cameras.count {
-            if isCancelled() { return [] }
+            if isCancelled() { return empty }
             let end = min(cameras.count, start + chunk)
-            var results = [[(Int32, Float)]](repeating: [], count: end - start)   // (face, score) per camera
+            var results = [[(Int32, Float, Bool)]](repeating: [], count: end - start)   // (face, score, strict) per camera
             results.withUnsafeMutableBufferPointer { out in
                 DispatchQueue.concurrentPerform(iterations: end - start) { k in
                     out[k] = self.visibleFaces(camera: start + k, mesh: mesh, faceNormals: faceNormals,
@@ -58,8 +69,8 @@ extension TextureBaker {
             }
             for (k, list) in results.enumerated() {
                 let ci = Int32(start + k)
-                for (face, score) in list {
-                    var c = candidates[Int(face)]
+                for (face, score, strict) in list {
+                    var c = strict ? candidates[Int(face)] : relaxed[Int(face)]
                     if c.count < keep {
                         c.append((ci, score))
                     } else if let worst = c.indices.min(by: { c[$0].1 < c[$1].1 }), c[worst].1 < score {
@@ -67,20 +78,24 @@ extension TextureBaker {
                     } else {
                         continue
                     }
-                    candidates[Int(face)] = c
+                    if strict { candidates[Int(face)] = c } else { relaxed[Int(face)] = c }
                 }
             }
             start = end
             progress(0.35 * Double(start) / Double(cameras.count), "Working out what each photo sees…")
         }
-        for f in 0..<faceCount { candidates[f].sort { $0.1 > $1.1 } }
+        for f in 0..<faceCount {
+            if candidates[f].isEmpty { candidates[f] = relaxed[f] }
+            candidates[f].sort { $0.1 > $1.1 }
+        }
+        relaxed = []
 
         // 3. View selection.
         progress(0.36, "Choosing the sharpest photo for every surface…")
         let adjacency = mesh.faceAdjacency()
         let labels = ViewSelection.solveGraph(labels: candidates.map { $0.map(\.0) },
                                               scores: candidates.map { $0.map(\.1) }, neighbours: adjacency)
-        if isCancelled() { return [] }
+        if isCancelled() { return empty }
 
         // 4. Charts: connected faces with the same photo, kept under 1024 px so atlases pack well.
         progress(0.42, "Cutting textures out of the photos…")
@@ -142,7 +157,7 @@ extension TextureBaker {
         // 5. Seam leveling between charts: compare both photos along shared edges.
         progress(0.5, "Evening out colors between photos…")
         let offsets = levelCharts(mesh: mesh, charts: charts, chartOf: chartOf, adjacency: adjacency)
-        if isCancelled() { return [] }
+        if isCancelled() { return empty }
 
         // 6. Atlas layout: scale everything down evenly if it would need more than `maxPages` pages.
         let pad = 2
@@ -158,9 +173,13 @@ extension TextureBaker {
 
         // 7. Fill each page from the photos and write it.
         var parts: [MeshPart] = []
+        var colorSum = SIMD3<Float>.zero, colorCount: Float = 0
+        // Shared-vertex bookkeeping: a vertex keeps one index per chart (its UV is the same everywhere in a chart).
+        var vertexSlot = [UInt32](repeating: 0, count: mesh.positions.count)
+        var vertexStamp = [Int32](repeating: -1, count: mesh.positions.count)
         let chartsByPage = Dictionary(grouping: charts.indices, by: { placements[$0].page })
         for page in 0..<pageCount {
-            if isCancelled() { return [] }
+            if isCancelled() { return empty }
             progress(0.55 + 0.4 * Double(page) / Double(max(1, pageCount)), "Painting texture page \(page + 1) of \(pageCount)…")
             let list = chartsByPage[page] ?? []
             var pixels = [UInt8](repeating: 0, count: pageSize * pageSize * 4)
@@ -199,22 +218,37 @@ extension TextureBaker {
                     }
                 }
             }
+            var o = 0
+            while o < pixels.count {
+                if pixels[o + 3] != 0 {
+                    colorSum += SIMD3(Float(pixels[o]), Float(pixels[o + 1]), Float(pixels[o + 2])) / 255
+                    colorCount += 1
+                }
+                o += 4 * 997
+            }
             let url = directory.appendingPathComponent("mesh_atlas_\(page).jpg")
             guard Self.writeRGBA(pixels, width: pageSize, height: pageSize, to: url) else { continue }
 
-            // Geometry for this page: three vertices per face (charts don't share vertices).
+            // Geometry for this page; vertices are shared within a chart.
             var part = MeshPart(positions: [], normals: [], uvs: [], indices: [], textureURL: url, color: .zero)
             let ps = Float(pageSize)
             for chartIndex in list {
                 let chart = charts[chartIndex]
                 let place = placements[chartIndex]
+                let stamp = Int32(chartIndex)
                 for f in chart.faces {
                     let (a, b, c) = mesh.triangle(f)
                     for (k, v) in [a, b, c].enumerated() {
+                        if vertexStamp[v] == stamp {
+                            part.indices.append(vertexSlot[v])
+                            continue
+                        }
                         let p = cornerPixels[f * 3 + k]
                         let u = (Float(place.x + pad) + (p.x - chart.lo.x) * scale) / ps
                         let w = (Float(place.y + pad) + (p.y - chart.lo.y) * scale) / ps
-                        part.indices.append(UInt32(part.positions.count))
+                        vertexStamp[v] = stamp
+                        vertexSlot[v] = UInt32(part.positions.count)
+                        part.indices.append(vertexSlot[v])
                         part.positions.append(mesh.positions[v])
                         part.normals.append(normals[v])
                         part.uvs.append(SIMD2(u, w))
@@ -226,11 +260,20 @@ extension TextureBaker {
 
         // 8. Faces no photo saw: one plain part in the mesh's average color.
         var unseen = MeshPart(positions: [], normals: [], uvs: [], indices: [], textureURL: nil,
-                              color: SIMD3(repeating: 0.6))
+                              color: colorCount > 0 ? colorSum / colorCount : SIMD3(repeating: 0.6))
+        var unseenFaces = 0
+        let unseenStamp = Int32(charts.count)
         for f in 0..<faceCount where labels[f] < 0 {
+            unseenFaces += 1
             let (a, b, c) = mesh.triangle(f)
             for v in [a, b, c] {
-                unseen.indices.append(UInt32(unseen.positions.count))
+                if vertexStamp[v] == unseenStamp {
+                    unseen.indices.append(vertexSlot[v])
+                    continue
+                }
+                vertexStamp[v] = unseenStamp
+                vertexSlot[v] = UInt32(unseen.positions.count)
+                unseen.indices.append(vertexSlot[v])
                 unseen.positions.append(mesh.positions[v])
                 unseen.normals.append(normals[v])
                 unseen.uvs.append(.zero)
@@ -238,7 +281,7 @@ extension TextureBaker {
         }
         if !unseen.indices.isEmpty { parts.append(unseen) }
         progress(1, "Mesh textured")
-        return parts
+        return MeshTextureResult(parts: parts, scale: scale, unseenShare: Float(unseenFaces) / Float(faceCount))
     }
 
     // MARK: Helpers
@@ -257,30 +300,32 @@ extension TextureBaker {
 
     /// Faces this photo sees, with a quality score (projected size × sharpness × how head-on).
     private func visibleFaces(camera ci: Int, mesh: ReconMesh, faceNormals: [SIMD3<Float>],
-                              centroids: [SIMD3<Float>], scene: ReconMesh) -> [(Int32, Float)] {
+                              centroids: [SIMD3<Float>], scene: ReconMesh) -> [(Int32, Float, Bool)] {
         let cam = cameras[ci]
         let zw = 320, zh = 240
         let zbuf = depthBuffer(cam, scene: scene, width: zw, height: zh)
         let sx = Float(zw) / cam.width, sy = Float(zh) / cam.height
         let resolution = decodedScale(cam)
-        var out: [(Int32, Float)] = []
+        var out: [(Int32, Float, Bool)] = []
         for f in 0..<mesh.triangleCount {
             let c = centroids[f]
             let toCam = cam.position - c
             let dist = simd_length(toCam)
-            guard dist > 0.15, dist < 5 else { continue }
+            guard dist > 0.15, dist < 6 else { continue }
             let facing = simd_dot(toCam / dist, faceNormals[f])
-            guard facing > 0.2, let pc = project(c, cam, margin: 0.01) else { continue }
-            // Hidden behind something nearer in this photo?
+            guard facing > 0.05, let pc = project(c, cam, margin: 0) else { continue }
+            // Hidden behind something nearer in this photo? (Strict test, or a loose one for the fallback list.)
             let zx = min(zw - 1, Int(pc.x * sx)), zy = min(zh - 1, Int(pc.y * sy))
-            if pc.z > zbuf[zy * zw + zx] + 0.04 + 0.02 * pc.z { continue }
+            let excess = pc.z - zbuf[zy * zw + zx]
+            if excess > 0.25 + 0.05 * pc.z { continue }
+            let strict = facing > 0.2 && dist < 5 && excess <= 0.04 + 0.02 * pc.z
             let (a, b, d) = mesh.triangle(f)
             guard let pa = project(mesh.positions[a], cam, margin: 0),
                   let pb = project(mesh.positions[b], cam, margin: 0),
                   let pd = project(mesh.positions[d], cam, margin: 0) else { continue }
             let area = abs((pb.x - pa.x) * (pd.y - pa.y) - (pd.x - pa.x) * (pb.y - pa.y)) / 2
             let score = area * resolution * resolution * cam.sharpness * facing
-            if score > 0 { out.append((Int32(f), score)) }
+            if score > 0 { out.append((Int32(f), strict ? score : score * 0.01, strict)) }
         }
         return out
     }

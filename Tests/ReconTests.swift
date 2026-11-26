@@ -159,6 +159,32 @@ final class ReconTests: XCTestCase {
         XCTAssertLessThan(a1, 0.15, "rotation error \(a1)° (was \(a0))")
     }
 
+    // MARK: Plane registration
+
+    /// A mesh floating 12 cm above the floor plane (as in the first real test) is pulled back down;
+    /// a table top 50 cm up doesn't disturb it.
+    func testPlaneRegistrationFindsFloorOffset() {
+        var points: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        for i in 0..<60 {
+            for j in 0..<60 {
+                points.append(SIMD3(Float(i) * 0.05 - 1.5, 0.12, Float(j) * 0.05 - 1.5))   // carpet, 12 cm too high
+                normals.append(SIMD3(0, 1, 0))
+            }
+        }
+        for i in 0..<20 {
+            for j in 0..<20 {
+                points.append(SIMD3(Float(i) * 0.03, 0.62, Float(j) * 0.03))                // table top
+                normals.append(SIMD3(0, 1, 0))
+            }
+        }
+        let floor = PlaneRegistration.Plane(point: .zero, normal: SIMD3(0, 1, 0), contains: { _ in true })
+        let result = PlaneRegistration.translation(points: points, normals: normals, planes: [floor])
+        XCTAssertEqual(result.translation.y, -0.12, accuracy: 0.01)
+        XCTAssertEqual(result.translation.x, 0, accuracy: 0.001)
+        XCTAssertGreaterThan(result.matches, 1000)
+    }
+
     // MARK: Helpers
 
     static func subdividedCube(n: Int) -> ReconMesh {

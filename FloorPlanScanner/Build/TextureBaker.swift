@@ -74,6 +74,9 @@ final class TextureBaker {
     private var cellCounts: [(nu: Int, nv: Int)] = []
     /// Per-surface photo chosen for each cell (view selection), -1 = none.
     private var labels: [[Int32]] = []
+    /// Per-photo depth buffers of the fused mesh + planes (when a detail pass exists): exact occlusion for planes.
+    private var occlusion: [[Float16]]?
+    private let occlusionSize = (w: 320, h: 240)
 
     /// A set of photos: the scan's keyframes (1920 px) or the detail pass's 12 MP stills.
     struct PhotoSource {
@@ -151,7 +154,8 @@ final class TextureBaker {
             cells.append(grid)
             // One sharp photo per cell, preferring the same photo as the neighbours (MRF view selection).
             labels.append(ViewSelection.solveGrid(labels: grid.map { $0.map(\.camera) },
-                                                  scores: grid.map { $0.map(\.score) }, nu: nu, nv: nv))
+                                                  scores: grid.map { $0.map(\.score) }, nu: nu, nv: nv,
+                                                  smoothness: 0.6))
             progress(0.5 * Double(si + 1) / Double(surfaces.count))
         }
         if isCancelled() { return }
@@ -196,7 +200,8 @@ final class TextureBaker {
         for c in scored {
             if chosen.count >= options.photosPerCell || tests >= 14 { break }
             tests += 1
-            if !blocked(from: cameras[Int(c.camera)].position, to: point, group: s.group) {
+            if !blocked(from: cameras[Int(c.camera)].position, to: point, group: s.group)
+                && !hiddenInMesh(point, Int(c.camera)) {
                 chosen.append(c)
             }
         }
@@ -440,7 +445,8 @@ final class TextureBaker {
             guard let img = images[ci] else { return nil }
             let cam = cameras[ci]
             guard weight(point, normal: s.normal, cam) != nil,
-                  let px = project(point, cam, margin: 0), !hiddenByDepth(px, img, cam) else { return nil }
+                  let px = project(point, cam, margin: 0), !hiddenByDepth(px, img, cam),
+                  !hiddenInMesh(point, ci) else { return nil }
             return simd_clamp(gains[ci] * sample(img, cam, px), .zero, SIMD3(repeating: 1))
         }
         if preferred >= 0, let c = look(Int(preferred)) { return (c, preferred) }
@@ -448,6 +454,39 @@ final class TextureBaker {
             if let c = look(Int(cand.camera)) { return (c, cand.camera) }
         }
         return nil
+    }
+
+    /// Uses the fused mesh (furniture, the tree, decorations…) plus walls and floors to decide what each photo sees.
+    /// Call after pose refinement and before `prepare`.
+    func setOcclusionScene(_ scene: ReconMesh, progress: (Double) -> Void) {
+        var buffers = [[Float16]](repeating: [], count: cameras.count)
+        let size = occlusionSize
+        let chunk = 32
+        var start = 0
+        while start < cameras.count {
+            let end = min(cameras.count, start + chunk)
+            buffers.withUnsafeMutableBufferPointer { out in
+                DispatchQueue.concurrentPerform(iterations: end - start) { k in
+                    let z = self.depthBuffer(self.cameras[start + k], scene: scene, width: size.w, height: size.h)
+                    out[start + k] = z.map { Float16(min($0, 60000)) }
+                }
+            }
+            start = end
+            progress(Double(start) / Double(cameras.count))
+        }
+        occlusion = buffers
+    }
+
+    /// Something in the fused mesh is in front of this spot in this photo.
+    @inline(__always)
+    private func hiddenInMesh(_ point: SIMD3<Float>, _ ci: Int) -> Bool {
+        guard let occlusion, ci < occlusion.count, !occlusion[ci].isEmpty else { return false }
+        let cam = cameras[ci]
+        guard let px = project(point, cam, margin: 0) else { return false }
+        let x = min(occlusionSize.w - 1, Int(px.x / cam.width * Float(occlusionSize.w)))
+        let y = min(occlusionSize.h - 1, Int(px.y / cam.height * Float(occlusionSize.h)))
+        let z = Float(occlusion[ci][y * occlusionSize.w + x])
+        return px.z > z + 0.05 + 0.02 * px.z
     }
 
     /// LiDAR says something is in front of this spot (it's hidden in this photo).

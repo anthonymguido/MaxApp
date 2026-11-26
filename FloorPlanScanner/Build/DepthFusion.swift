@@ -11,6 +11,8 @@ enum DepthFusion {
     struct Result {
         var mesh: ReconMesh
         var note: String
+        /// Shift applied to line the detail pass up with the room scan; detail-pass photos need the same shift.
+        var offset: SIMD3<Float>
     }
 
     static func reconstruct(logURL: URL, frameDir: URL, geometry: SurfaceBuilder.Result, room: CapturedRoom,
@@ -64,17 +66,47 @@ enum DepthFusion {
         guard raw > 0 else { return nil }
         if isCancelled() { return nil }
 
-        // 3. Hybrid merge: walls, floors and ceilings stay RoomPlan planes.
-        progress(0.78, "Straightening walls and floors…")
+        // 3. Line the mesh up with RoomPlan's walls and floor (the detail pass can relocalize a few cm off).
+        progress(0.76, "Lining the 3D shape up with the room…")
         let planes = geometry.surfaces.filter { $0.kind == .wall || $0.kind == .floor || $0.kind == .ceiling }
+        mesh.taubinSmooth(iterations: 2)   // steadier normals for the plane tests
+        // Vertical only: the floor (and ceiling) pin the height. In the first real test the walls already lined up,
+        // and RoomPlan's wall centre lines aren't exact enough to pull the mesh sideways.
+        let registrationPlanes: [PlaneRegistration.Plane] = planes.filter { $0.kind != .wall }.map { s in
+            PlaneRegistration.Plane(point: s.origin, normal: s.normal, contains: { p in
+                let lp = s.local(p)
+                guard lp.x > -0.05, lp.y > -0.05, lp.x < s.size.x + 0.05, lp.y < s.size.y + 0.05 else { return false }
+                if let poly = s.polygon { return Geometry2D.pointInPolygon(lp, poly) }
+                return true
+            })
+        }
+        let registration = PlaneRegistration.translation(points: mesh.positions, normals: mesh.vertexNormals(),
+                                                         planes: registrationPlanes)
+        var offset = SIMD3<Float>(0, registration.translation.y, 0)
+        if abs(offset.y) > 0.4 || abs(offset.y) < 0.005 { offset = .zero }   // implausible or negligible
+        if offset != .zero {
+            for i in mesh.positions.indices { mesh.positions[i] += offset }
+        }
+
+        // 4. Hybrid merge: walls, floors and ceilings stay RoomPlan planes.
+        progress(0.78, "Straightening walls and floors…")
         let boxes: [(simd_float4x4, SIMD3<Float>)] = room.objects
             .filter { cutOut.contains($0.identifier) }
             .map { ($0.transform.inverse, $0.dimensions / 2 + 0.05) }
-        func onPlane(_ p: SIMD3<Float>) -> Bool {
+        // A vertex belongs to a plane if it's close to it AND its surface faces the same way, so furniture
+        // standing against a wall or on the floor is kept (its sides and top face other directions or sit further out).
+        func onPlane(_ p: SIMD3<Float>, _ n: SIMD3<Float>) -> Bool {
             for s in planes {
                 let d = simd_dot(p - s.origin, s.normal)
-                let tolerance: Float = s.kind == .wall ? 0.07 : 0.045
-                guard abs(d) < tolerance else { continue }
+                let aligned = abs(simd_dot(n, s.normal))
+                switch s.kind {
+                case .wall:
+                    guard abs(d) < 0.08, aligned > 0.8 else { continue }
+                case .floor:
+                    guard d > -0.05, d < 0.06, aligned > 0.85 else { continue }
+                default:   // ceiling
+                    guard abs(d) < 0.08, aligned > 0.85 else { continue }
+                }
                 let lp = s.local(p)
                 if lp.x > -0.1, lp.y > -0.1, lp.x < s.size.x + 0.1, lp.y < s.size.y + 0.1 {
                     if let poly = s.polygon, !Geometry2D.pointInPolygon(lp, poly) { continue }
@@ -92,14 +124,25 @@ enum DepthFusion {
         }
         var planeVertex = [Bool](repeating: false, count: mesh.positions.count)
         var cutVertex = [Bool](repeating: false, count: mesh.positions.count)
+        // Anything outside the rooms' floor outlines (seen through doorways and windows) is dropped too.
+        let floors = geometry.surfaces.filter { $0.kind == .floor && $0.polygon != nil }
+        func outsideRooms(_ p: SIMD3<Float>) -> Bool {
+            guard !floors.isEmpty else { return false }
+            for s in floors {
+                let lp = s.local(p)
+                if let poly = s.polygon, Geometry2D.distanceToPolygon(lp, poly) < 0.15 { return false }
+            }
+            return true
+        }
         let positions = mesh.positions
+        let vertexNormals = mesh.vertexNormals()
         planeVertex.withUnsafeMutableBufferPointer { pv in
             cutVertex.withUnsafeMutableBufferPointer { cv in
                 DispatchQueue.concurrentPerform(iterations: 64) { chunk in
                     var i = chunk
                     while i < positions.count {
-                        pv[i] = onPlane(positions[i])
-                        cv[i] = !boxes.isEmpty && inCutOut(positions[i])
+                        pv[i] = onPlane(positions[i], vertexNormals[i])
+                        cv[i] = (!boxes.isEmpty && inCutOut(positions[i])) || outsideRooms(positions[i])
                         i += 64
                     }
                 }
@@ -116,7 +159,7 @@ enum DepthFusion {
         progress(0.84, "Cleaning up the 3D shape…")
         mesh.removeSmallComponents(minTriangles: 400)
         guard mesh.triangleCount > 0 else { return nil }
-        mesh.taubinSmooth(iterations: 3)
+        mesh.taubinSmooth(iterations: 1)
         if isCancelled() { return nil }
         progress(0.88, "Simplifying the 3D shape…")
         if mesh.triangleCount > targetTriangles {
@@ -124,6 +167,11 @@ enum DepthFusion {
         }
         progress(1, "3D shape ready")
         let mb = volume.memoryBytes / 1_048_576
-        return Result(mesh: mesh, note: "3D shape fused from \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume).")
+        var note = "3D shape fused from \(log.frames.count) LiDAR frames (\(raw.formatted()) → \(mesh.triangleCount.formatted()) triangles, \(mb) MB volume)."
+        if offset != .zero {
+            note += String(format: " Detail pass lined up with the room scan (moved %.0f cm: %.0f / %.0f / %.0f).",
+                           simd_length(offset) * 100, offset.x * 100, offset.y * 100, offset.z * 100)
+        }
+        return Result(mesh: mesh, note: note, offset: offset)
     }
 }

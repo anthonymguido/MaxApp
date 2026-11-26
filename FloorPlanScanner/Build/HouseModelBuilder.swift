@@ -95,7 +95,16 @@ enum HouseModelBuilder {
         if let data = try? Data(contentsOf: input.highResLogURL),
            let log = try? JSONDecoder().decode(KeyframeLog.self, from: data), !log.frames.isEmpty {
             // 12 MP stills from the detail pass: decoded at up to 2048 px for sharper textures.
-            sources.append(TextureBaker.PhotoSource(frames: log.frames, imageDir: input.highResDir, depthDir: nil,
+            // Same shift as the fused mesh, so detail-pass photos stay lined up with it.
+            var frames = log.frames
+            if let offset = fused?.offset, offset != .zero {
+                for i in frames.indices where frames[i].transform.count == 16 {
+                    frames[i].transform[12] += offset.x
+                    frames[i].transform[13] += offset.y
+                    frames[i].transform[14] += offset.z
+                }
+            }
+            sources.append(TextureBaker.PhotoSource(frames: frames, imageDir: input.highResDir, depthDir: nil,
                                                     decodeSize: 2048))
         }
         let baker = TextureBaker(surfaces: geometry.surfaces, sources: sources)
@@ -106,6 +115,15 @@ enum HouseModelBuilder {
                                            progress: { progress(p0 + 0.06 * $0, "Lining up \(baker.photoCount) photos…") },
                                            isCancelled: isCancelled)
         if isCancelled() { return nil }
+        if let fused {
+            // Exact occlusion for walls and floors from the 3D shape (things in front of a wall don't get painted on it).
+            var scene = fused.mesh
+            for s in geometry.surfaces where s.rendered && (s.kind == .wall || s.kind == .floor || s.kind == .ceiling) {
+                baker.appendTessellated(s, to: &scene, cell: 0.3)
+            }
+            baker.setOcclusionScene(scene) { progress(p0 + 0.06, "Working out what each photo sees… \(Int($0 * 100))%") }
+            if isCancelled() { return nil }
+        }
         progress(p0 + 0.06, "Matching \(baker.photoCount) photos to walls and floors…")
         baker.prepare(progress: { progress(p0 + 0.06 + (bakeShare - 0.06) * 0.3 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
                       isCancelled: isCancelled)
@@ -130,11 +148,15 @@ enum HouseModelBuilder {
         }
         // 3b. Texture the fused mesh from the photos (one sharp photo per face, packed into atlases).
         var meshParts: [TextureBaker.MeshPart] = []
+        var meshNote: String?
         if let fused {
             let start = p0 + bakeShare
-            meshParts = baker.textureMesh(fused.mesh, directory: input.texturesDir,
-                                          progress: { progress(start + (0.92 - start) * $0, $1) },
-                                          isCancelled: isCancelled)
+            let result = baker.textureMesh(fused.mesh, directory: input.texturesDir,
+                                           progress: { progress(start + (0.92 - start) * $0, $1) },
+                                           isCancelled: isCancelled)
+            meshParts = result.parts
+            meshNote = String(format: "3D shape textures at %.0f%% of photo resolution; %.0f%% of it seen by no photo.",
+                              result.scale * 100, result.unseenShare * 100)
         }
         baker.releaseCache()
         if isCancelled() { return nil }
@@ -162,6 +184,19 @@ enum HouseModelBuilder {
             let area = s.size.x * s.size.y
             let prev = groupSum[s.group] ?? (.zero, 0)
             groupSum[s.group] = (prev.0 + b.averageColor * area, prev.1 + area)
+        }
+        // Wall sides no photo saw (e.g. the outside of outer walls) take the average color of the seen walls.
+        var wallSum = SIMD3<Float>.zero, wallArea: Float = 0
+        for si in drawn where geometry.surfaces[si].kind == .wall {
+            guard let b = baked[si], b.textureURL != nil else { continue }
+            let area = geometry.surfaces[si].size.x * geometry.surfaces[si].size.y
+            wallSum += b.averageColor * area
+            wallArea += area
+        }
+        if wallArea > 0 {
+            for si in drawn where geometry.surfaces[si].kind == .wall && baked[si]?.textureURL == nil {
+                baked[si] = TextureBaker.BakedSurface(textureURL: nil, coverage: 0, averageColor: wallSum / wallArea)
+            }
         }
         for si in drawn {
             let s = geometry.surfaces[si]
@@ -211,6 +246,7 @@ enum HouseModelBuilder {
         }
         if let fused { lines.append(fused.note) }
         if let refineNote { lines.append(refineNote) }
+        if let meshNote { lines.append(meshNote) }
         if !usable.isEmpty {
             lines.append("\(placed) detailed piece\(placed == 1 ? "" : "s") of furniture placed.")
         }
