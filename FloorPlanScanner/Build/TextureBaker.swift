@@ -36,8 +36,8 @@ final class TextureBaker {
         let imageURL: URL
         let depthURL: URL?
         let depthSize: (w: Int, h: Int)
-        let position: SIMD3<Float>
-        let worldToCamera: simd_float4x4
+        var position: SIMD3<Float>
+        var worldToCamera: simd_float4x4
         let fx: Float, fy: Float, cx: Float, cy: Float
         let width: Float, height: Float
         let sharpness: Float
@@ -61,7 +61,7 @@ final class TextureBaker {
     }
 
     private let options: Options
-    let cameras: [Camera]
+    var cameras: [Camera]
     let surfaces: [PlanarSurface]
     private let occluders: [Int]
     private var cache: [Int: DecodedImage] = [:]

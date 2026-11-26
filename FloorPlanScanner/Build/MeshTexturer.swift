@@ -286,7 +286,7 @@ extension TextureBaker {
     }
 
     /// Nearest-surface depth (camera axis, metres) per pixel of a small buffer.
-    private func depthBuffer(_ cam: Camera, scene: ReconMesh, width w: Int, height h: Int) -> [Float] {
+    func depthBuffer(_ cam: Camera, scene: ReconMesh, width w: Int, height h: Int) -> [Float] {
         var zbuf = [Float](repeating: .greatestFiniteMagnitude, count: w * h)
         let sx = Float(w) / cam.width, sy = Float(h) / cam.height
         var projected = [SIMD3<Float>?](repeating: nil, count: scene.positions.count)
@@ -329,7 +329,7 @@ extension TextureBaker {
     }
 
     /// Adds a plane's area to the occlusion scene as small triangles (so planes crossing the camera still clip).
-    private func appendTessellated(_ s: PlanarSurface, to mesh: inout ReconMesh, cell: Float) {
+    func appendTessellated(_ s: PlanarSurface, to mesh: inout ReconMesh, cell: Float) {
         let nu = max(1, Int((s.size.x / cell).rounded(.up))), nv = max(1, Int((s.size.y / cell).rounded(.up)))
         let du = s.size.x / Float(nu), dv = s.size.y / Float(nv)
         for j in 0..<nv {

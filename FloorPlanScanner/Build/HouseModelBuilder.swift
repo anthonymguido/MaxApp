@@ -47,6 +47,7 @@ enum HouseModelBuilder {
     static func run(_ input: Input, progress: @escaping (Double, String) -> Void,
                     isCancelled: @escaping () -> Bool) throws -> Output? {
         let fm = FileManager.default
+        let started = Date()
         progress(0, "Reading the scan…")
         let room: CapturedRoom
         do {
@@ -98,8 +99,15 @@ enum HouseModelBuilder {
                                                     decodeSize: 2048))
         }
         let baker = TextureBaker(surfaces: geometry.surfaces, sources: sources)
-        progress(p0 + 0.02, "Matching \(baker.photoCount) photos to walls and floors…")
-        baker.prepare(progress: { progress(p0 + 0.02 + bakeShare * 0.3 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
+
+        // 2b. Line the photos up with the geometry (photometric pose refinement).
+        progress(p0, "Lining up \(baker.photoCount) photos…")
+        let refineNote = baker.refinePoses(mesh: fused?.mesh,
+                                           progress: { progress(p0 + 0.06 * $0, "Lining up \(baker.photoCount) photos…") },
+                                           isCancelled: isCancelled)
+        if isCancelled() { return nil }
+        progress(p0 + 0.06, "Matching \(baker.photoCount) photos to walls and floors…")
+        baker.prepare(progress: { progress(p0 + 0.06 + (bakeShare - 0.06) * 0.3 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
                       isCancelled: isCancelled)
         if isCancelled() { return nil }
 
@@ -111,7 +119,7 @@ enum HouseModelBuilder {
         for (n, si) in drawn.enumerated() {
             if isCancelled() { baker.releaseCache(); return nil }
             let s = geometry.surfaces[si]
-            progress(p0 + bakeShare * (0.3 + 0.7 * Double(n) / Double(max(1, drawn.count))),
+            progress(p0 + 0.06 + (bakeShare - 0.06) * (0.3 + 0.7 * Double(n) / Double(max(1, drawn.count))),
                      "Painting \(label(s.kind)) \(n + 1) of \(drawn.count)…")
             let result = baker.bake(surfaceIndex: si, to: input.texturesDir, isCancelled: isCancelled)
             baked[si] = result
@@ -202,12 +210,15 @@ enum HouseModelBuilder {
             lines.append("Built from \(baker.photoCount) photos. Photos covered about \(pct)% of the walls and floors; the rest is filled with nearby colors.")
         }
         if let fused { lines.append(fused.note) }
+        if let refineNote { lines.append(refineNote) }
         if !usable.isEmpty {
             lines.append("\(placed) detailed piece\(placed == 1 ? "" : "s") of furniture placed.")
         }
         if pct > 0 && pct < 60 {
             lines.append("Tip: for fuller textures, scan again more slowly and point the phone at every wall and the floor.")
         }
+        let seconds = Int(Date().timeIntervalSince(started))
+        lines.append(String(format: "Build took %d:%02d.", seconds / 60, seconds % 60))
         return Output(note: lines.joined(separator: "\n"))
     }
 

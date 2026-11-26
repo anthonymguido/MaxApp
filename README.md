@@ -102,23 +102,30 @@ full-detail photogrammetry model of each room on a Mac, which iPhones can't do.
 ## How it works
 
 1. **Measure**: Apple RoomPlan uses LiDAR to find walls, doors, windows, floors and furniture,
-   accurate to a few centimetres.
-2. **Photograph**: during the same scan, the app keeps a photo every ~12° of turn or ~25 cm of
-   walking (skipping blurry moments). For each one it saves the exact camera position and lens, and the
-   LiDAR depth map when available.
-3. **Build the shell**: each wall becomes two textured faces (inside and outside of the room) with
-   holes cut for doors, windows and openings. Floors follow RoomPlan's floor outlines. Furniture is
-   a box.
-4. **Paint**: for every 10 cm patch of every surface, the app picks the 3 photos that see it best:
-   facing it, close to it, sharp, and **not blocked** by another wall or piece of furniture (checked
-   against the plan and the LiDAR depth). It blends them at 1 cm per pixel, smoothly between patches,
-   and evens out brightness between photos so camera auto-exposure doesn't show as blotches.
-5. **Detail**: Object Capture models of furniture are fitted into their boxes.
-6. **Save**: everything is written as one `.usdz`, centred, with the floor at height 0.
+   accurate to a few centimetres. During this walk the app also keeps a posed photo every ~12°.
+2. **Detail pass**: the same AR session keeps running (same coordinates) and records LiDAR depth
+   frames and 12-megapixel stills, each with its exact camera position.
+3. **Real shapes**: the depth frames are fused into a 3D volume (TSDF, 2 cm voxels; Nießner et al.
+   2013), and the surface is extracted (surface nets). Parts lying on RoomPlan's walls, floors and
+   ceilings are dropped, so those stay perfectly flat; everything else (sofa, TV, shelves, plants) is
+   real geometry. Noise is removed, then the mesh is smoothed and simplified with quadric error metrics
+   (Garland & Heckbert 1997).
+4. **Line up the photos**: every photo's position is refined so all photos agree on the colors of the
+   surface (Color Map Optimization; Zhou & Koltun 2014). This removes the 1–3 cm drift of phone
+   tracking that otherwise causes ghosting.
+5. **Paint**: following "Let There Be Color!" (Waechter et al. 2014), each surface patch or mesh face
+   picks **one** photo. Large, sharp, head-on photos win, neighbours prefer the same photo, and a z-buffer
+   makes sure the photo really sees it. Photos get brightness and white-balance corrections, seams
+   between photos are leveled, and spots no photo saw are filled with texture borrowed from nearby.
+   Mesh textures are cut from the photos at full resolution and packed into 4096 px atlases.
+6. **Detail capture**: Object Capture models of furniture are fitted into their RoomPlan boxes.
+7. **Save**: everything is written as one `.usdz`, centred, with the floor at height 0. The house page
+   notes how many photos and triangles went in and how long the build took.
 
 ### Limits
-- Shapes are RoomPlan's: walls are flat, and furniture is a box unless you capture detail for it.
-  Very cluttered shelves look like a painted box.
+- Without a detail pass, furniture is a painted box unless you capture detail for it.
+- Black, shiny and see-through things (TV screens, glass, mirrors) are hard for LiDAR and may have
+  holes or simplified shapes.
 - Ceilings are off by default, so you can look down into the rooms. Turn them on with
   **Include ceilings**.
 - Mirrors, glass and TV screens show whatever they reflected.

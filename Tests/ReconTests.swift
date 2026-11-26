@@ -122,6 +122,43 @@ final class ReconTests: XCTestCase {
         }
     }
 
+    // MARK: Pose refinement
+
+    /// A camera knocked 2 cm and ~0.8° off its true pose is pulled back by photometric Gauss-Newton.
+    func testPoseRefinementRecoversOffset() {
+        let cam = PoseMath.Pinhole(fx: 300, fy: 300, cx: 160, cy: 120, width: 320, height: 240)
+        func image(_ u: Float, _ v: Float) -> (value: Float, gradient: SIMD2<Float>) {
+            let value = 0.5 + 0.25 * sin(u / 9) * cos(v / 7) + 0.15 * sin((u + v) / 13)
+            let gu = 0.25 * cos(u / 9) / 9 * cos(v / 7) + 0.15 * cos((u + v) / 13) / 13
+            let gv = -0.25 * sin(u / 9) * sin(v / 7) / 7 + 0.15 * cos((u + v) / 13) / 13
+            return (value, SIMD2(gu, gv))
+        }
+        let truth = matrix_identity_float4x4
+        var points: [SIMD3<Float>] = []
+        for j in 0..<30 {
+            for i in 0..<40 {
+                let z: Float = (i + j) % 2 == 0 ? -2 : -2.6
+                points.append(SIMD3(Float(i) / 39 * 2.4 - 1.2, Float(j) / 29 * 1.6 - 0.8, z) * (-z / 2))
+            }
+        }
+        let targets: [Float] = points.map { p in
+            let q = truth * SIMD4(p.x, p.y, p.z, 1)
+            let z = -q.z
+            return image(cam.fx * q.x / z + cam.cx, -cam.fy * q.y / z + cam.cy).value
+        }
+        var pose = PoseMath.rigid(rotation: SIMD3(0.01, -0.008, 0.006), translation: SIMD3(0.02, -0.012, 0.008)) * truth
+        let (d0, a0) = PoseMath.difference(pose, truth)
+        XCTAssertGreaterThan(d0, 0.015)
+        for _ in 0..<40 {
+            guard let step = PoseMath.gaussNewtonStep(worldToCamera: pose, points: points, targets: targets,
+                                                      camera: cam, gain: 1, sample: { image($0, $1) }) else { break }
+            pose = step.0
+        }
+        let (d1, a1) = PoseMath.difference(pose, truth)
+        XCTAssertLessThan(d1, 0.003, "translation error \(d1) m (was \(d0))")
+        XCTAssertLessThan(a1, 0.15, "rotation error \(a1)° (was \(a0))")
+    }
+
     // MARK: Helpers
 
     static func subdividedCube(n: Int) -> ReconMesh {
