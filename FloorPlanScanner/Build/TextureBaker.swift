@@ -64,8 +64,8 @@ final class TextureBaker {
     private let occluders: [Int]
     private var cache: [Int: DecodedImage] = [:]
     private var cacheOrder: [Int] = []
-    /// Per-photo brightness correction.
-    private var gains: [Float]
+    /// Per-photo brightness and white-balance correction (red, green, blue gains).
+    private var gains: [SIMD3<Float>]
     /// Per-surface cell candidates, filled by `prepare`.
     private var cells: [[[Candidate]]] = []
     private var cellCounts: [(nu: Int, nv: Int)] = []
@@ -95,7 +95,7 @@ final class TextureBaker {
                                sharpness: 1 / (1 + kf.turnRate / 25)))
         }
         cameras = cams
-        gains = Array(repeating: 1, count: cams.count)
+        gains = Array(repeating: SIMD3<Float>(repeating: 1), count: cams.count)
     }
 
     var photoCount: Int { cameras.count }
@@ -185,7 +185,7 @@ final class TextureBaker {
         let dist = simd_length(toCam)
         guard dist > 0.15, dist < options.maxDistance else { return nil }
         let facing = simd_dot(toCam / dist, normal)
-        guard facing > 0.15, let px = project(point, cam, margin: 0.02) else { return nil }
+        guard facing > 0.25, let px = project(point, cam, margin: 0.02) else { return nil }
         // Lower weight near the photo's edges, so seams fall where photos are weakest.
         let ex = min(px.x, cam.width - px.x) / (cam.width * 0.5)
         let ey = min(px.y, cam.height - px.y) / (cam.height * 0.5)
@@ -227,10 +227,11 @@ final class TextureBaker {
         return false
     }
 
-    /// Estimates a brightness gain per photo so overlapping photos agree.
+    /// Estimates a red/green/blue gain per photo so overlapping photos agree in brightness and color
+    /// (the camera changes exposure and white balance as it moves).
     private func balanceExposure(progress: (Double) -> Void, isCancelled: () -> Bool) {
         // Sample each cell centre in each of its photos.
-        struct Sample { var cell: Int; var camera: Int; var luminance: Float; var weight: Float }
+        struct Sample { var cell: Int; var camera: Int; var rgb: SIMD3<Float>; var weight: Float }
         var byCamera: [Int: [(cell: Int, point: SIMD3<Float>, weight: Float)]] = [:]
         var cellID = 0
         for (si, s) in surfaces.enumerated() {
@@ -255,8 +256,10 @@ final class TextureBaker {
             for entry in byCamera[ci] ?? [] {
                 guard let px = project(entry.point, cam, margin: 0) else { continue }
                 let rgb = sample(img, cam, px)
-                let lum = 0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
-                if lum > 0.03, lum < 0.97 { samples.append(Sample(cell: entry.cell, camera: ci, luminance: lum, weight: entry.weight)) }
+                // Skip nearly black or blown-out spots: their ratios say nothing.
+                if rgb.min() > 0.03, rgb.max() < 0.97 {
+                    samples.append(Sample(cell: entry.cell, camera: ci, rgb: rgb, weight: entry.weight))
+                }
             }
             if k % 20 == 0 { progress(Double(k) / Double(max(1, keys.count))) }
         }
@@ -264,22 +267,36 @@ final class TextureBaker {
 
         let samplesByCell = Dictionary(grouping: samples, by: \.cell)
         let samplesByCamera = Dictionary(grouping: samples, by: \.camera)
-        for _ in 0..<4 {
-            var target: [Int: Float] = [:]
+        for _ in 0..<5 {
+            var target: [Int: SIMD3<Float>] = [:]
             for (cell, list) in samplesByCell {
-                var sum: Float = 0, wsum: Float = 0
-                for s in list { sum += s.weight * gains[s.camera] * s.luminance; wsum += s.weight }
+                var sum = SIMD3<Float>.zero, wsum: Float = 0
+                for s in list { sum += s.weight * gains[s.camera] * s.rgb; wsum += s.weight }
                 if wsum > 0 { target[cell] = sum / wsum }
             }
             for (cam, list) in samplesByCamera {
-                let ratios = list.compactMap { s in target[s.cell].map { $0 / s.luminance } }.sorted()
-                guard !ratios.isEmpty else { continue }
-                gains[cam] = min(2, max(0.5, ratios[ratios.count / 2]))
+                var r: [Float] = [], g: [Float] = [], b: [Float] = []
+                for s in list {
+                    guard let t = target[s.cell] else { continue }
+                    r.append(t.x / s.rgb.x); g.append(t.y / s.rgb.y); b.append(t.z / s.rgb.z)
+                }
+                guard !r.isEmpty else { continue }
+                let gain = SIMD3(Self.median(r), Self.median(g), Self.median(b))
+                // Color correction is held to a narrower range than brightness, so real colored light survives.
+                let lum = max(0.01, (gain.x + gain.y + gain.z) / 3)
+                let tint = simd_clamp(gain / lum, SIMD3(repeating: 0.8), SIMD3(repeating: 1.25))
+                gains[cam] = tint * min(2, max(0.5, lum))
             }
-            let sorted = gains.sorted()
-            let median = sorted[sorted.count / 2]
-            if median > 0 { gains = gains.map { $0 / median } }
+            // Keep the overall look of the typical photo.
+            let mid = SIMD3(Self.median(gains.map(\.x)), Self.median(gains.map(\.y)), Self.median(gains.map(\.z)))
+            if mid.min() > 0 { gains = gains.map { $0 / mid } }
         }
+    }
+
+    private static func median(_ values: [Float]) -> Float {
+        guard !values.isEmpty else { return 1 }
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     // MARK: Pass 2: bake each surface
@@ -357,8 +374,7 @@ final class TextureBaker {
         guard seenCount > 0 else { return BakedSurface(textureURL: nil, coverage: 0, averageColor: avg) }
 
         // Grow seen texels into unseen ones (holes, edges, under furniture), then fill the rest.
-        Self.dilate(&color, &valid, width: tw, height: th, passes: 16)
-        for i in color.indices where !valid[i] { color[i] = avg }
+        Self.fillHoles(&color, valid: valid, width: tw, height: th, fallback: avg)
 
         let url = directory.appendingPathComponent("\(s.name).jpg")
         let ok = Self.writeJPEG(color, width: tw, height: th, to: url)
@@ -495,32 +511,179 @@ final class TextureBaker {
 
     // MARK: Image helpers
 
-    static func dilate(_ color: inout [SIMD3<Float>], _ valid: inout [Bool], width: Int, height: Int, passes: Int) {
-        for _ in 0..<passes {
-            var changed = false
-            var newColor = color
-            var newValid = valid
-            for y in 0..<height {
-                for x in 0..<width where !valid[y * width + x] {
-                    var sum = SIMD3<Float>.zero
-                    var n: Float = 0
-                    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                        let xx = x + dx, yy = y + dy
-                        guard xx >= 0, yy >= 0, xx < width, yy < height, valid[yy * width + xx] else { continue }
-                        sum += color[yy * width + xx]
-                        n += 1
+    /// Fills texels no photo saw. A smooth base comes from the surrounding seen colors (push-pull, so there
+    /// are no streaks or flat blocks), and fine detail (carpet pile, wood grain, paint texture) is borrowed from
+    /// a nearby, fully seen patch of the same surface so the filled area doesn't look painted on.
+    static func fillHoles(_ color: inout [SIMD3<Float>], valid: [Bool], width w: Int, height h: Int,
+                          fallback: SIMD3<Float>) {
+        guard valid.contains(false) else { return }
+        let base = pushPull(color, valid: valid, width: w, height: h, fallback: fallback)
+
+        // Low-pass of the base; detail = base - low-pass (only meaningful where seen).
+        let radius = min(12, max(4, min(w, h) / 40))
+        let low = boxBlur(base, width: w, height: h, radius: radius)
+
+        // Tiles: find fully (90%+) seen tiles to borrow detail from.
+        let tile = 24
+        let tx = (w + tile - 1) / tile, ty = (h + tile - 1) / tile
+        var seenShare = [Float](repeating: 0, count: tx * ty)
+        var energy = [Float](repeating: 0, count: tx * ty)
+        for j in 0..<ty {
+            for i in 0..<tx {
+                var seen = 0, total = 0
+                var e: Float = 0
+                for y in (j * tile)..<min(h, (j + 1) * tile) {
+                    for x in (i * tile)..<min(w, (i + 1) * tile) {
+                        total += 1
+                        let k = y * w + x
+                        if valid[k] {
+                            seen += 1
+                            let d = base[k] - low[k]
+                            e += simd_dot(d, d)
+                        }
                     }
-                    if n > 0 {
-                        newColor[y * width + x] = sum / n
-                        newValid[y * width + x] = true
-                        changed = true
+                }
+                seenShare[j * tx + i] = total > 0 ? Float(seen) / Float(total) : 0
+                energy[j * tx + i] = seen > 0 ? e / Float(seen) : 0
+            }
+        }
+        let isSource = seenShare.map { $0 >= 0.9 }
+        let anySource = isSource.contains(true)
+
+        var out = base
+        for j in 0..<ty {
+            for i in 0..<tx {
+                let t = j * tx + i
+                guard seenShare[t] < 1 else { continue }
+                // Among the closest fully seen tiles, borrow from the calmest one (avoids copying picture frames, edges).
+                var src: Int?
+                if anySource {
+                    // Grow a square around this tile until it holds a few fully seen tiles.
+                    var found: [Int] = []
+                    var r = 1
+                    while found.count < 4 && r <= max(tx, ty) {
+                        found = []
+                        for jj in max(0, j - r)...min(ty - 1, j + r) {
+                            for ii in max(0, i - r)...min(tx - 1, i + r) where isSource[jj * tx + ii] {
+                                found.append(jj * tx + ii)
+                            }
+                        }
+                        r *= 2
+                    }
+                    src = found.min { energy[$0] < energy[$1] }
+                }
+                for y in (j * tile)..<min(h, (j + 1) * tile) {
+                    for x in (i * tile)..<min(w, (i + 1) * tile) {
+                        let k = y * w + x
+                        guard !valid[k] else { continue }
+                        var c = low[k]
+                        if let src {
+                            let sx = min(w - 1, (src % tx) * tile + (x - i * tile))
+                            let sy = min(h - 1, (src / tx) * tile + (y - j * tile))
+                            let sk = sy * w + sx
+                            if valid[sk] {
+                                let d = base[sk] - low[sk]
+                                c += simd_clamp(d * 0.85, SIMD3(repeating: -0.12), SIMD3(repeating: 0.12))
+                            }
+                        }
+                        out[k] = simd_clamp(c, .zero, SIMD3(repeating: 1))
                     }
                 }
             }
-            color = newColor
-            valid = newValid
-            if !changed { break }
         }
+        color = out
+    }
+
+    /// Smooth hole filling: average down a pyramid of the seen texels, then blend back up.
+    static func pushPull(_ color: [SIMD3<Float>], valid: [Bool], width: Int, height: Int,
+                         fallback: SIMD3<Float>) -> [SIMD3<Float>] {
+        struct Level { var w: Int; var h: Int; var c: [SIMD3<Float>]; var a: [Float] }
+        var levels: [Level] = []
+        var c0 = [SIMD3<Float>](repeating: .zero, count: width * height)
+        var a0 = [Float](repeating: 0, count: width * height)
+        for i in c0.indices where valid[i] { c0[i] = color[i]; a0[i] = 1 }
+        levels.append(Level(w: width, h: height, c: c0, a: a0))
+        while levels.last!.w > 1 || levels.last!.h > 1 {
+            let p = levels.last!
+            let nw = (p.w + 1) / 2, nh = (p.h + 1) / 2
+            var c = [SIMD3<Float>](repeating: .zero, count: nw * nh)
+            var a = [Float](repeating: 0, count: nw * nh)
+            for y in 0..<nh {
+                for x in 0..<nw {
+                    var sc = SIMD3<Float>.zero, sa: Float = 0
+                    for dy in 0...1 {
+                        for dx in 0...1 {
+                            let xx = x * 2 + dx, yy = y * 2 + dy
+                            guard xx < p.w, yy < p.h else { continue }
+                            sc += p.c[yy * p.w + xx]
+                            sa += p.a[yy * p.w + xx]
+                        }
+                    }
+                    if sa > 1 { sc /= sa; sa = 1 }   // keep colour premultiplied with weight ≤ 1
+                    c[y * nw + x] = sc
+                    a[y * nw + x] = sa
+                }
+            }
+            levels.append(Level(w: nw, h: nh, c: c, a: a))
+        }
+        // Top: anything never seen at all gets the fallback.
+        let top = levels.count - 1
+        if levels[top].a[0] <= 0 {
+            levels[top].c[0] = fallback
+        } else {
+            levels[top].c[0] /= levels[top].a[0]
+        }
+        levels[top].a[0] = 1
+        guard top > 0 else { return levels[0].c }
+        for l in stride(from: top - 1, through: 0, by: -1) {
+            let parent = levels[l + 1]
+            var cur = levels[l]
+            for y in 0..<cur.h {
+                for x in 0..<cur.w {
+                    let k = y * cur.w + x
+                    let a = min(1, cur.a[k])
+                    guard a < 1 else { continue }
+                    // Bilinear sample of the (already filled) parent.
+                    let fx = min(max((Float(x) + 0.5) / 2 - 0.5, 0), Float(parent.w - 1))
+                    let fy = min(max((Float(y) + 0.5) / 2 - 0.5, 0), Float(parent.h - 1))
+                    let x0 = Int(fx), y0 = Int(fy)
+                    let x1 = min(x0 + 1, parent.w - 1), y1 = min(y0 + 1, parent.h - 1)
+                    let tx = fx - Float(x0), ty = fy - Float(y0)
+                    let upper = parent.c[y0 * parent.w + x0] * (1 - tx) + parent.c[y0 * parent.w + x1] * tx
+                    let lower = parent.c[y1 * parent.w + x0] * (1 - tx) + parent.c[y1 * parent.w + x1] * tx
+                    let pc = upper * (1 - ty) + lower * ty
+                    cur.c[k] = cur.c[k] + pc * (1 - a)
+                    cur.a[k] = 1
+                }
+            }
+            levels[l] = cur
+        }
+        var out = levels[0].c
+        for i in out.indices where valid[i] { out[i] = color[i] }
+        return out
+    }
+
+    /// Separable box blur with clamped edges.
+    static func boxBlur(_ src: [SIMD3<Float>], width w: Int, height h: Int, radius r: Int) -> [SIMD3<Float>] {
+        var tmp = src
+        var out = src
+        for y in 0..<h {
+            var acc = SIMD3<Float>.zero
+            for x in -r...r { acc += src[y * w + min(max(x, 0), w - 1)] }
+            for x in 0..<w {
+                tmp[y * w + x] = acc / Float(2 * r + 1)
+                acc += src[y * w + min(x + r + 1, w - 1)] - src[y * w + max(x - r, 0)]
+            }
+        }
+        for x in 0..<w {
+            var acc = SIMD3<Float>.zero
+            for y in -r...r { acc += tmp[min(max(y, 0), h - 1) * w + x] }
+            for y in 0..<h {
+                out[y * w + x] = acc / Float(2 * r + 1)
+                acc += tmp[min(y + r + 1, h - 1) * w + x] - tmp[max(y - r, 0) * w + x]
+            }
+        }
+        return out
     }
 
     static func writeJPEG(_ color: [SIMD3<Float>], width: Int, height: Int, to url: URL) -> Bool {

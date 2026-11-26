@@ -74,6 +74,8 @@ same `.ipa`. Your scans are kept.
   saw gets filled in with nearby colors.
 - Walk a little way into each room rather than scanning from the doorway, so walls are photographed
   face-on and not at a sharp angle.
+- **Sweep the floor too.** Before tapping Done in each room, tilt the phone down and slowly sweep the
+  middle of the floor, including where you were standing. That's the part scans miss most.
 - Up to about 800 photos are recorded per scan. Scan one floor at a time.
 
 ### Furniture detail (photogrammetry)

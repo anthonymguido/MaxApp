@@ -110,8 +110,20 @@ enum HouseModelBuilder {
         house.addChildNode(structure)
         house.addChildNode(furniture)
 
+        // Faces no photo saw (e.g. tops of tall cabinets) take the average color of the same object's seen faces.
+        var groupSum: [Int: (SIMD3<Float>, Float)] = [:]
         for si in drawn {
             let s = geometry.surfaces[si]
+            guard s.kind == .furniture, let b = baked[si], b.textureURL != nil else { continue }
+            let area = s.size.x * s.size.y
+            let prev = groupSum[s.group] ?? (.zero, 0)
+            groupSum[s.group] = (prev.0 + b.averageColor * area, prev.1 + area)
+        }
+        for si in drawn {
+            let s = geometry.surfaces[si]
+            if s.kind == .furniture, baked[si]?.textureURL == nil, let g = groupSum[s.group], g.1 > 0 {
+                baked[si] = TextureBaker.BakedSurface(textureURL: nil, coverage: 0, averageColor: g.0 / g.1)
+            }
             guard let node = node(for: s, baked: baked[si]) else { continue }
             (s.kind == .furniture ? furniture : structure).addChildNode(node)
         }
