@@ -209,11 +209,11 @@ final class TSDFVolume {
                             var values = SIMD8<Float>()
                             var missing = -1
                             var bad = false
-                            var sum: Float = 0
+                            var cornerSum: Float = 0
                             for (c, o) in corners.enumerated() {
                                 if let v = self.value(cell &+ o) {
                                     values[c] = v
-                                    sum += v
+                                    cornerSum += v
                                 } else if missing < 0 {
                                     missing = c          // one unobserved corner is tolerated…
                                 } else {
@@ -222,7 +222,7 @@ final class TSDFVolume {
                                 }
                             }
                             guard !bad else { continue }
-                            if missing >= 0 { values[missing] = sum / 7 }   // closes 1-voxel gaps
+                            if missing >= 0 { values[missing] = cornerSum / 7 }   // closes 1-voxel gaps
                             var mask = 0
                             for c in 0..<8 where values[c] < 0 { mask |= 1 << c }
                             guard mask != 0, mask != 255 else { continue }
