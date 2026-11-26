@@ -16,11 +16,12 @@ final class TextureBaker {
         var texelSize: Float = 0.01
         var maxTextureSize = 2048
         var cellSize: Float = 0.10
-        var photosPerCell = 3
+        /// Candidate photos kept per cell for view selection.
+        var photosPerCell = 5
         /// Longest edge of the photos when decoded for baking (they're ~1920 px; 640 is still finer than 1 cm at room distances).
-        var decodeSize = 640
+        var decodeSize = 960
         /// Photos kept decoded at once (each is about 1.2 MB at 640 px).
-        var cacheCapacity = 180
+        var cacheCapacity = 110
         var maxDistance: Float = 7
     }
 
@@ -69,6 +70,8 @@ final class TextureBaker {
     /// Per-surface cell candidates, filled by `prepare`.
     private var cells: [[[Candidate]]] = []
     private var cellCounts: [(nu: Int, nv: Int)] = []
+    /// Per-surface photo chosen for each cell (view selection), -1 = none.
+    private var labels: [[Int32]] = []
 
     init(surfaces: [PlanarSurface], frames: [Keyframe], framesDir: URL, depthDir: URL, options: Options = Options()) {
         self.options = options
@@ -105,6 +108,7 @@ final class TextureBaker {
     func prepare(progress: (Double) -> Void, isCancelled: () -> Bool) {
         cells = []
         cellCounts = []
+        labels = []
         for (si, s) in surfaces.enumerated() {
             if isCancelled() { return }
             let nu = max(1, Int((s.size.x / options.cellSize).rounded(.up)))
@@ -112,6 +116,7 @@ final class TextureBaker {
             cellCounts.append((nu, nv))
             guard s.rendered, !cameras.isEmpty else {
                 cells.append(Array(repeating: [], count: nu * nv))
+                labels.append(Array(repeating: -1, count: nu * nv))
                 continue
             }
             let candidates = camerasSeeing(s)
@@ -127,6 +132,9 @@ final class TextureBaker {
                 }
             }
             cells.append(grid)
+            // One sharp photo per cell, preferring the same photo as the neighbours (MRF view selection).
+            labels.append(ViewSelection.solveGrid(labels: grid.map { $0.map(\.camera) },
+                                                  scores: grid.map { $0.map(\.score) }, nu: nu, nv: nv))
             progress(0.5 * Double(si + 1) / Double(surfaces.count))
         }
         if isCancelled() { return }
@@ -169,7 +177,7 @@ final class TextureBaker {
         var chosen: [Candidate] = []
         var tests = 0
         for c in scored {
-            if chosen.count >= options.photosPerCell || tests >= 10 { break }
+            if chosen.count >= options.photosPerCell || tests >= 14 { break }
             tests += 1
             if !blocked(from: cameras[Int(c.camera)].position, to: point, group: s.group) {
                 chosen.append(c)
@@ -241,7 +249,7 @@ final class TextureBaker {
                     let list = cells[si][j * nu + i]
                     if list.count >= 2 {
                         let p = s.world(simd_min(SIMD2((Float(i) + 0.5) * options.cellSize, (Float(j) + 0.5) * options.cellSize), s.size))
-                        for c in list { byCamera[Int(c.camera), default: []].append((cellID, p, c.score)) }
+                        for c in list.prefix(3) { byCamera[Int(c.camera), default: []].append((cellID, p, c.score)) }
                     }
                     cellID += 1
                 }
@@ -310,11 +318,14 @@ final class TextureBaker {
         let th = max(4, Int((s.size.y / texel).rounded(.up)))
         let (nu, nv) = cellCounts[si]
         let grid = cells[si]
+        let cellLabels = labels[si]
         let cellSize = options.cellSize
 
         var color = [SIMD3<Float>](repeating: .zero, count: tw * th)
         var valid = [Bool](repeating: false, count: tw * th)
         var inside = [Bool](repeating: false, count: tw * th)
+        var texelLabel = [Int32](repeating: -1, count: tw * th)
+        var texelCell = [Int32](repeating: -1, count: tw * th)
 
         // Work in bands of cell rows so only the photos one band needs are decoded at once.
         let bandRows = 6
@@ -324,7 +335,11 @@ final class TextureBaker {
             let b0 = band, b1 = min(nv, band + bandRows)
             var needed = Set<Int>()
             for j in max(0, b0 - 1)..<min(nv, b1 + 1) {
-                for i in 0..<nu { for c in grid[j * nu + i] { needed.insert(Int(c.camera)) } }
+                for i in 0..<nu {
+                    let c = j * nu + i
+                    if cellLabels[c] >= 0 { needed.insert(Int(cellLabels[c])) }
+                    for cand in grid[c].prefix(2) { needed.insert(Int(cand.camera)) }
+                }
             }
             let images = loadImages(needed)
 
@@ -334,26 +349,36 @@ final class TextureBaker {
             let rowEnd = min(th, Int(((s.size.y - vLo) / texel).rounded(.up)) + 1)
             if rowStart < rowEnd {
                 color.withUnsafeMutableBufferPointer { colorBuf in
-                    valid.withUnsafeMutableBufferPointer { validBuf in
-                        inside.withUnsafeMutableBufferPointer { insideBuf in
-                            DispatchQueue.concurrentPerform(iterations: rowEnd - rowStart) { k in
-                                let row = rowStart + k
-                                let v = s.size.y - (Float(row) + 0.5) * texel
-                                guard (v >= vLo || b0 == 0) && (v < vHi || b1 == nv) else { return }
-                                for col in 0..<tw {
-                                    let u = (Float(col) + 0.5) * texel
-                                    let lp = SIMD2(min(u, s.size.x), max(v, 0))
-                                    let idx = row * tw + col
-                                    guard s.contains(lp) else { continue }
-                                    insideBuf[idx] = true
-                                    if let c = self.shade(s, lp, grid: grid, nu: nu, nv: nv, images: images) {
-                                        colorBuf[idx] = c
-                                        validBuf[idx] = true
-                                    }
-                                }
+                valid.withUnsafeMutableBufferPointer { validBuf in
+                inside.withUnsafeMutableBufferPointer { insideBuf in
+                texelLabel.withUnsafeMutableBufferPointer { labelBuf in
+                texelCell.withUnsafeMutableBufferPointer { cellBuf in
+                    DispatchQueue.concurrentPerform(iterations: rowEnd - rowStart) { k in
+                        let row = rowStart + k
+                        let v = s.size.y - (Float(row) + 0.5) * texel
+                        guard (v >= vLo || b0 == 0) && (v < vHi || b1 == nv) else { return }
+                        for col in 0..<tw {
+                            let u = (Float(col) + 0.5) * texel
+                            let lp = SIMD2(min(u, s.size.x), max(v, 0))
+                            let idx = row * tw + col
+                            guard s.contains(lp) else { continue }
+                            insideBuf[idx] = true
+                            let ci = min(max(Int(lp.x / cellSize), 0), nu - 1)
+                            let cj = min(max(Int(lp.y / cellSize), 0), nv - 1)
+                            let cell = cj * nu + ci
+                            cellBuf[idx] = Int32(cell)
+                            if let hit = self.shadeSingle(s, lp, preferred: cellLabels[cell], candidates: grid[cell],
+                                                          images: images) {
+                                colorBuf[idx] = hit.color
+                                labelBuf[idx] = hit.camera
+                                validBuf[idx] = true
                             }
                         }
                     }
+                }
+                }
+                }
+                }
                 }
             }
             band = b1
@@ -373,7 +398,15 @@ final class TextureBaker {
         }
         guard seenCount > 0 else { return BakedSurface(textureURL: nil, coverage: 0, averageColor: avg) }
 
-        // Grow seen texels into unseen ones (holes, edges, under furniture), then fill the rest.
+        // Even out color steps where one photo's patch meets the next.
+        ViewSelection.levelSeams(color: &color, valid: valid, texelLabel: texelLabel, texelCell: texelCell,
+                                 width: tw, height: th, nu: nu, nv: nv, cellLabel: cellLabels) { x, y in
+            let u = (Float(x) + 0.5) * texel
+            let v = s.size.y - (Float(y) + 0.5) * texel
+            return SIMD2(u / cellSize - 0.5, v / cellSize - 0.5)
+        }
+
+        // Fill texels no photo saw (holes, edges, under furniture).
         Self.fillHoles(&color, valid: valid, width: tw, height: th, fallback: avg)
 
         let url = directory.appendingPathComponent("\(s.name).jpg")
@@ -381,42 +414,23 @@ final class TextureBaker {
         return BakedSurface(textureURL: ok ? url : nil, coverage: coverage, averageColor: avg)
     }
 
-    /// Blended color of a texel from its cell's photos and its neighbours' (bilinear between cells).
+    /// Color of a texel from one photo: the cell's chosen photo, or the next best one that sees this exact spot.
     @inline(__always)
-    private func shade(_ s: PlanarSurface, _ lp: SIMD2<Float>, grid: [[Candidate]], nu: Int, nv: Int,
-                       images: [Int: DecodedImage]) -> SIMD3<Float>? {
+    private func shadeSingle(_ s: PlanarSurface, _ lp: SIMD2<Float>, preferred: Int32, candidates: [Candidate],
+                             images: [Int: DecodedImage]) -> (color: SIMD3<Float>, camera: Int32)? {
         let point = s.world(lp)
-        let fu = lp.x / options.cellSize - 0.5
-        let fv = lp.y / options.cellSize - 0.5
-        let i0 = Int(fu.rounded(.down)), j0 = Int(fv.rounded(.down))
-        let tu = fu - Float(i0), tv = fv - Float(j0)
-        var total = SIMD3<Float>.zero
-        var totalW: Float = 0
-        for dj in 0...1 {
-            for di in 0...1 {
-                let i = min(max(i0 + di, 0), nu - 1), j = min(max(j0 + dj, 0), nv - 1)
-                let bw = (di == 0 ? 1 - tu : tu) * (dj == 0 ? 1 - tv : tv)
-                guard bw > 1e-4 else { continue }
-                var cellColor = SIMD3<Float>.zero
-                var cellW: Float = 0
-                for cand in grid[j * nu + i] {
-                    let ci = Int(cand.camera)
-                    guard let img = images[ci] else { continue }
-                    let cam = cameras[ci]
-                    guard let w = weight(point, normal: s.normal, cam),
-                          let px = project(point, cam, margin: 0) else { continue }
-                    if hiddenByDepth(px, img, cam) { continue }
-                    cellColor += w * gains[ci] * sample(img, cam, px)
-                    cellW += w
-                }
-                if cellW > 0 {
-                    total += bw * (cellColor / cellW)
-                    totalW += bw
-                }
-            }
+        func look(_ ci: Int) -> SIMD3<Float>? {
+            guard let img = images[ci] else { return nil }
+            let cam = cameras[ci]
+            guard weight(point, normal: s.normal, cam) != nil,
+                  let px = project(point, cam, margin: 0), !hiddenByDepth(px, img, cam) else { return nil }
+            return simd_clamp(gains[ci] * sample(img, cam, px), .zero, SIMD3(repeating: 1))
         }
-        guard totalW > 0 else { return nil }
-        return simd_clamp(total / totalW, .zero, SIMD3(repeating: 1))
+        if preferred >= 0, let c = look(Int(preferred)) { return (c, preferred) }
+        for cand in candidates where cand.camera != preferred {
+            if let c = look(Int(cand.camera)) { return (c, cand.camera) }
+        }
+        return nil
     }
 
     /// LiDAR says something is in front of this spot (it's hidden in this photo).
