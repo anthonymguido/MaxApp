@@ -18,3 +18,19 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.FloorPlanScanner
         INFOPLIST_FILE: FloorPlanScanner/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
+  ReconTests:
+    # Unit tests for the reconstruction math (no ARKit), run on the iOS Simulator in CI.
+    type: bundle.unit-test
+    platform: iOS
+    sources: [FloorPlanScanner/Recon, Tests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ReconTests
+schemes:
+  ReconTests:
+    build:
+      targets:
+        ReconTests: all
+    test:
+      targets: [ReconTests]

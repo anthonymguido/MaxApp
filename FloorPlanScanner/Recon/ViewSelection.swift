@@ -64,6 +64,80 @@ enum ViewSelection {
         return result
     }
 
+    /// Labels the faces of a mesh with one photo each (same MRF as `solveGrid`, on the face adjacency graph).
+    /// Neighbouring faces' smoothness penalty is weighted, so big shared edges matter more than tiny ones.
+    static func solveGraph(labels: [[Int32]], scores: [[Float]], neighbours: [[Int32]],
+                           smoothness: Float = 0.35, sweeps: Int = 10) -> [Int32] {
+        let n = labels.count
+        precondition(scores.count == n && neighbours.count == n)
+        var cost: [[Float]] = []
+        cost.reserveCapacity(n)
+        for f in 0..<n {
+            let best = scores[f].max() ?? 0
+            cost.append(scores[f].map { best > 0 ? 1 - $0 / best : 1 })
+        }
+        var result = (0..<n).map { labels[$0].first ?? -1 }
+        for sweep in 0..<sweeps {
+            var changed = 0
+            let order: [Int] = sweep % 2 == 0 ? Array(0..<n) : Array((0..<n).reversed())
+            for f in order {
+                let options = labels[f]
+                guard options.count > 1 else { continue }
+                var bestLabel = result[f]
+                var bestEnergy = Float.greatestFiniteMagnitude
+                for (k, label) in options.enumerated() {
+                    var e = cost[f][k]
+                    for nb in neighbours[f] {
+                        let other = result[Int(nb)]
+                        if other >= 0 && other != label { e += smoothness }
+                    }
+                    if e < bestEnergy - 1e-6 {
+                        bestEnergy = e
+                        bestLabel = label
+                    }
+                }
+                if bestLabel != result[f] {
+                    result[f] = bestLabel
+                    changed += 1
+                }
+            }
+            if changed == 0 { break }
+        }
+        return result
+    }
+
+    /// Per-patch color offsets that make neighbouring patches agree (global seam leveling at patch level).
+    /// - Parameters:
+    ///   - patchCount: number of patches.
+    ///   - constraints: (patch a, patch b, mean color of a − mean color of b along their shared border, weight).
+    /// - Returns: an offset per patch to add to its colors.
+    static func levelPatches(patchCount: Int, constraints: [(Int, Int, SIMD3<Float>, Float)],
+                             regularization: Float = 1, iterations: Int = 80) -> [SIMD3<Float>] {
+        var adjacency = [[(Int, Float, SIMD3<Float>)]](repeating: [], count: patchCount)
+        for (a, b, diff, w) in constraints where a != b && w > 0 {
+            // Want color_a + g_a = color_b + g_b  →  g_a − g_b = −diff.
+            adjacency[a].append((b, w, -diff))
+            adjacency[b].append((a, w, diff))
+        }
+        var g = [SIMD3<Float>](repeating: .zero, count: patchCount)
+        for _ in 0..<iterations {
+            var maxChange: Float = 0
+            for a in 0..<patchCount where !adjacency[a].isEmpty {
+                var num = SIMD3<Float>.zero
+                var den = regularization
+                for (b, w, target) in adjacency[a] {
+                    num += w * (g[b] + target)
+                    den += w
+                }
+                let new = num / den
+                maxChange = max(maxChange, simd_length(new - g[a]))
+                g[a] = new
+            }
+            if maxChange < 1e-4 { break }
+        }
+        return g
+    }
+
     /// Levels the seams of a baked texture made of single-photo patches.
     /// - Parameters:
     ///   - color: texture (row-major), changed in place.

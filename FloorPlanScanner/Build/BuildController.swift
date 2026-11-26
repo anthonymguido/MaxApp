@@ -35,6 +35,8 @@ final class BuildController: ObservableObject {
                                             framesDir: store.framesURL(for: id), depthDir: store.depthURL(for: id),
                                             texturesDir: store.texturesURL(for: id),
                                             highResDir: store.highResURL(for: id), highResLogURL: store.highResLogURL(for: id),
+                                            depthFramesDir: store.depthFramesURL(for: id),
+                                            depthFrameLogURL: store.depthFrameLogURL(for: id),
                                             outputURL: store.modelURL(for: id),
                                             includeCeilings: house.includeCeilings, details: details)
         let flag = CancelFlag()

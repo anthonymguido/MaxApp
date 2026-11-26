@@ -33,3 +33,11 @@ jobs:
         with:
           name: FloorPlanScanner-ipa
           path: FloorPlanScanner.ipa
+
+      - name: Unit tests (reconstruction math)
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in sorted(d.items(), reverse=True) if 'iOS' in k for x in v if 'iPhone' in x['name']))")
+          echo "Simulator: $UDID"
+          xcodebuild test -project FloorPlanScanner.xcodeproj -scheme ReconTests -destination "id=$UDID" \
+            CODE_SIGNING_ALLOWED=NO | tail -40
+          exit ${PIPESTATUS[0]}

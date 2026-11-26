@@ -31,7 +31,7 @@ final class TextureBaker {
         var averageColor: SIMD3<Float>
     }
 
-    private struct Camera {
+    struct Camera {
         let index: Int
         let imageURL: URL
         let depthURL: URL?
@@ -45,7 +45,7 @@ final class TextureBaker {
         let resolution: Float
     }
 
-    private struct DecodedImage {
+    struct DecodedImage {
         let pixels: [UInt8]   // RGBA8
         let width: Int
         let height: Int
@@ -61,14 +61,14 @@ final class TextureBaker {
     }
 
     private let options: Options
-    private let cameras: [Camera]
-    private let surfaces: [PlanarSurface]
+    let cameras: [Camera]
+    let surfaces: [PlanarSurface]
     private let occluders: [Int]
     private var cache: [Int: DecodedImage] = [:]
     private var cacheUsed = 0
     private var cacheOrder: [Int] = []
     /// Per-photo brightness and white-balance correction (red, green, blue gains).
-    private var gains: [SIMD3<Float>]
+    private(set) var gains: [SIMD3<Float>]
     /// Per-surface cell candidates, filled by `prepare`.
     private var cells: [[[Candidate]]] = []
     private var cellCounts: [(nu: Int, nv: Int)] = []
@@ -220,7 +220,7 @@ final class TextureBaker {
 
     /// Pixel position (x, y) and depth along the camera axis, or nil if outside the photo.
     @inline(__always)
-    private func project(_ p: SIMD3<Float>, _ cam: Camera, margin: Float) -> SIMD3<Float>? {
+    func project(_ p: SIMD3<Float>, _ cam: Camera, margin: Float) -> SIMD3<Float>? {
         let c = cam.worldToCamera * SIMD4(p.x, p.y, p.z, 1)
         let z = -c.z
         guard z > 0.05 else { return nil }
@@ -463,7 +463,7 @@ final class TextureBaker {
 
     /// Bilinear color at a photo pixel position (photo pixels, scaled to the decoded size). Linear-ish 0…1.
     @inline(__always)
-    private func sample(_ img: DecodedImage, _ cam: Camera, _ px: SIMD3<Float>) -> SIMD3<Float> {
+    func sample(_ img: DecodedImage, _ cam: Camera, _ px: SIMD3<Float>) -> SIMD3<Float> {
         let x = px.x / cam.width * Float(img.width) - 0.5
         let y = px.y / cam.height * Float(img.height) - 0.5
         let x0 = min(max(Int(x.rounded(.down)), 0), img.width - 1)
@@ -489,7 +489,7 @@ final class TextureBaker {
         return result
     }
 
-    private func image(_ ci: Int, protecting: Set<Int> = []) -> DecodedImage? {
+    func image(_ ci: Int, protecting: Set<Int> = []) -> DecodedImage? {
         if let hit = cache[ci] {
             if let k = cacheOrder.firstIndex(of: ci) { cacheOrder.remove(at: k) }
             cacheOrder.append(ci)

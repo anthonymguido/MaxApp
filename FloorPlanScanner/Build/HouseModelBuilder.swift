@@ -20,6 +20,8 @@ enum HouseModelBuilder {
         var texturesDir: URL
         var highResDir: URL
         var highResLogURL: URL
+        var depthFramesDir: URL
+        var depthFrameLogURL: URL
         var outputURL: URL
         var includeCeilings: Bool
         var details: [DetailModel]
@@ -65,7 +67,24 @@ enum HouseModelBuilder {
         var options = SurfaceBuilder.Options()
         options.includeCeilings = input.includeCeilings
         options.replacedObjects = Set(usable.map(\.objectID))
-        let geometry = SurfaceBuilder.build(room, options: options)
+        var geometry = SurfaceBuilder.build(room, options: options)
+
+        // 1b. Real 3D shapes from the detail pass's LiDAR depth (if recorded).
+        var fused: DepthFusion.Result?
+        if fm.fileExists(atPath: input.depthFrameLogURL.path) {
+            fused = DepthFusion.reconstruct(logURL: input.depthFrameLogURL, frameDir: input.depthFramesDir,
+                                            geometry: geometry, room: room, cutOut: Set(usable.map(\.objectID)),
+                                            progress: { progress(0.3 * $0, $1) }, isCancelled: isCancelled)
+            if isCancelled() { return nil }
+        }
+        if fused != nil {
+            // The mesh has the real furniture: its boxes are no longer drawn (they still help work out occlusion).
+            for i in geometry.surfaces.indices where geometry.surfaces[i].kind == .furniture {
+                geometry.surfaces[i].rendered = false
+            }
+        }
+        let p0 = fused == nil ? 0.0 : 0.3      // progress after fusion
+        let bakeShare = fused == nil ? 0.88 : 0.4
 
         // 2. Choose photos for each spot and balance their brightness.
         try? fm.removeItem(at: input.texturesDir)
@@ -79,8 +98,8 @@ enum HouseModelBuilder {
                                                     decodeSize: 2048))
         }
         let baker = TextureBaker(surfaces: geometry.surfaces, sources: sources)
-        progress(0.02, "Matching \(baker.photoCount) photos to walls and floors…")
-        baker.prepare(progress: { progress(0.02 + 0.28 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
+        progress(p0 + 0.02, "Matching \(baker.photoCount) photos to walls and floors…")
+        baker.prepare(progress: { progress(p0 + 0.02 + bakeShare * 0.3 * $0, "Matching \(baker.photoCount) photos to walls and floors…") },
                       isCancelled: isCancelled)
         if isCancelled() { return nil }
 
@@ -92,7 +111,7 @@ enum HouseModelBuilder {
         for (n, si) in drawn.enumerated() {
             if isCancelled() { baker.releaseCache(); return nil }
             let s = geometry.surfaces[si]
-            progress(0.3 + 0.6 * Double(n) / Double(max(1, drawn.count)),
+            progress(p0 + bakeShare * (0.3 + 0.7 * Double(n) / Double(max(1, drawn.count))),
                      "Painting \(label(s.kind)) \(n + 1) of \(drawn.count)…")
             let result = baker.bake(surfaceIndex: si, to: input.texturesDir, isCancelled: isCancelled)
             baked[si] = result
@@ -100,6 +119,14 @@ enum HouseModelBuilder {
                 coverageSum += result.coverage
                 coverageCount += 1
             }
+        }
+        // 3b. Texture the fused mesh from the photos (one sharp photo per face, packed into atlases).
+        var meshParts: [TextureBaker.MeshPart] = []
+        if let fused {
+            let start = p0 + bakeShare
+            meshParts = baker.textureMesh(fused.mesh, directory: input.texturesDir,
+                                          progress: { progress(start + (0.92 - start) * $0, $1) },
+                                          isCancelled: isCancelled)
         }
         baker.releaseCache()
         if isCancelled() { return nil }
@@ -136,6 +163,9 @@ enum HouseModelBuilder {
             guard let node = node(for: s, baked: baked[si]) else { continue }
             (s.kind == .furniture ? furniture : structure).addChildNode(node)
         }
+        for (i, part) in meshParts.enumerated() {
+            if let node = node(for: part, name: "Scanned_\(i)") { furniture.addChildNode(node) }
+        }
 
         // 5. Detailed furniture from photogrammetry, fitted into its RoomPlan box.
         var placed = 0
@@ -171,6 +201,7 @@ enum HouseModelBuilder {
         } else {
             lines.append("Built from \(baker.photoCount) photos. Photos covered about \(pct)% of the walls and floors; the rest is filled with nearby colors.")
         }
+        if let fused { lines.append(fused.note) }
         if !usable.isEmpty {
             lines.append("\(placed) detailed piece\(placed == 1 ? "" : "s") of furniture placed.")
         }
@@ -229,6 +260,33 @@ enum HouseModelBuilder {
 
         let node = SCNNode(geometry: geometry)
         node.name = s.name
+        return node
+    }
+
+    /// A SceneKit node for one textured piece of the fused mesh.
+    private static func node(for part: TextureBaker.MeshPart, name: String) -> SCNNode? {
+        guard part.indices.count >= 3 else { return nil }
+        let vertices = part.positions.map { SCNVector3($0.x, $0.y, $0.z) }
+        let normals = part.normals.map { SCNVector3($0.x, $0.y, $0.z) }
+        let uvs = part.uvs.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
+        let geometry = SCNGeometry(sources: [SCNGeometrySource(vertices: vertices),
+                                             SCNGeometrySource(normals: normals),
+                                             SCNGeometrySource(textureCoordinates: uvs)],
+                                   elements: [SCNGeometryElement(indices: part.indices, primitiveType: .triangles)])
+        let material = SCNMaterial()
+        material.name = name
+        material.lightingModel = .physicallyBased
+        material.roughness.contents = 0.8
+        material.metalness.contents = 0.0
+        if let url = part.textureURL, let image = UIImage(contentsOfFile: url.path) {
+            material.diffuse.contents = image
+        } else {
+            let c = part.color
+            material.diffuse.contents = UIColor(red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
+        }
+        geometry.materials = [material]
+        let node = SCNNode(geometry: geometry)
+        node.name = name
         return node
     }
 
