@@ -296,8 +296,9 @@ enum HouseModelBuilder {
         material.roughness.contents = s.kind == .window ? 0.1 : 0.85
         material.metalness.contents = 0.0
         material.isDoubleSided = false
-        if let url = baked?.textureURL, let image = UIImage(contentsOfFile: url.path) {
-            material.diffuse.contents = image
+        if let url = baked?.textureURL, FileManager.default.fileExists(atPath: url.path) {
+            // A file URL makes SceneKit copy the JPEG into the USDZ as-is (a UIImage gets re-encoded as a ~3x larger PNG).
+            material.diffuse.contents = url
         } else {
             let c = baked?.averageColor ?? s.defaultColor
             material.diffuse.contents = UIColor(red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)
@@ -325,8 +326,9 @@ enum HouseModelBuilder {
         material.lightingModel = .physicallyBased
         material.roughness.contents = 0.8
         material.metalness.contents = 0.0
-        if let url = part.textureURL, let image = UIImage(contentsOfFile: url.path) {
-            material.diffuse.contents = image
+        if let url = part.textureURL, FileManager.default.fileExists(atPath: url.path) {
+            // A file URL makes SceneKit copy the JPEG into the USDZ as-is (a UIImage gets re-encoded as a ~3x larger PNG).
+            material.diffuse.contents = url
         } else {
             let c = part.color
             material.diffuse.contents = UIColor(red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1)

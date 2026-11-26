@@ -6,7 +6,7 @@ import ModelIO
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Experiment (prints results, never fails): which way of writing a USDZ keeps JPEG textures as JPEG?
+/// Which way of writing a USDZ keeps JPEG textures as JPEG? (Checks the one the app uses; prints the others.)
 /// SceneKit re-encoded UIImage textures as PNG in the first real export, making the file 3–4× bigger.
 final class ExportExperimentTests: XCTestCase {
     func testWhichExportKeepsJPEG() throws {
@@ -33,7 +33,12 @@ final class ExportExperimentTests: XCTestCase {
         for (name, contents) in variants {
             let out = dir.appendingPathComponent("\(name).usdz")
             let ok = plane(contents).write(to: out, options: nil, delegate: nil, progressHandler: nil)
-            print("EXPERIMENT \(name): write=\(ok) entries=\(Self.zipEntries(out))")
+            let entries = Self.zipEntries(out)
+            print("EXPERIMENT \(name): write=\(ok) entries=\(entries)")
+            if name == "scenekit-url" {
+                // The app relies on this: file-URL textures are stored as the original JPEG.
+                XCTAssertTrue(entries.contains { $0.contains(".jpg") }, "SceneKit no longer keeps JPEG textures")
+            }
         }
 
         // ModelIO export of the SceneKit scene.
