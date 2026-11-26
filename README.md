@@ -67,6 +67,9 @@ same `.ipa`. Your scans are kept.
    room. The LiDAR mesh drawn over the camera shows what's been captured. Sweep furniture from high,
    middle and low, get close to shelves, and cover the whole floor. The app takes sharp 12-megapixel
    photos and records LiDAR depth as you go. Tap **Finish** when done, or **Skip**.
+   At the start it first **lines up with your room scan**: point at a wall or furniture you already
+   scanned and hold still for a moment until the counters start moving.
+   You can also do it later, from the house page: **Add detail pass** (stand in the scanned rooms).
 5. On the house page tap **Build textured house**. Keep the app open. It takes a minute or two for a
    small flat, longer for a big house.
 6. **View in 3D / AR** to look around. **Share textured model** exports the `.usdz`, which opens in

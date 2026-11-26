@@ -1,3 +1,4 @@
+import ARKit
 import SwiftUI
 import UIKit
 
@@ -74,6 +75,27 @@ final class HouseStore: ObservableObject {
     func highResLogURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("highres.json") }
     func depthFramesURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("DepthFrames", isDirectory: true) }
     func depthFrameLogURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("depthframes.json") }
+    /// The room scan's ARKit world map: lets a detail pass (now or later) line up with the room scan.
+    func worldMapURL(for id: UUID) -> URL { folder(for: id).appendingPathComponent("worldmap.arexperience") }
+
+    func hasWorldMap(_ id: UUID) -> Bool { fm.fileExists(atPath: worldMapURL(for: id).path) }
+
+    @discardableResult
+    func saveWorldMap(_ map: ARWorldMap, for id: UUID) -> Bool {
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
+            try data.write(to: worldMapURL(for: id), options: .atomic)
+            return true
+        } catch {
+            print("Failed to save world map: \(error)")
+            return false
+        }
+    }
+
+    func loadWorldMap(for id: UUID) -> ARWorldMap? {
+        guard let data = try? Data(contentsOf: worldMapURL(for: id)) else { return nil }
+        return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
+    }
 
     func hasRoom(_ id: UUID) -> Bool { fm.fileExists(atPath: roomURL(for: id).path) }
     func hasModel(_ id: UUID) -> Bool { fm.fileExists(atPath: modelURL(for: id).path) }
@@ -91,7 +113,7 @@ final class HouseStore: ObservableObject {
             try? fm.removeItem(at: url)
         }
         for url in [frameLogURL(for: id), roomURL(for: id), roomModelURL(for: id), modelURL(for: id), planURL(for: id),
-                    highResLogURL(for: id), depthFrameLogURL(for: id)] {
+                    highResLogURL(for: id), depthFrameLogURL(for: id), worldMapURL(for: id)] {
             try? fm.removeItem(at: url)
         }
         try? fm.createDirectory(at: framesURL(for: id), withIntermediateDirectories: true)

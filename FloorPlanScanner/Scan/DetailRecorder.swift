@@ -77,20 +77,24 @@ final class DetailRecorder: ObservableObject {
         }
     }
 
-    /// Switches the (still running) RoomPlan AR session to a configuration with LiDAR depth, a live mesh and
-    /// high-resolution stills. Not resetting tracking keeps the same world coordinates as the RoomPlan scan.
-    static func configure(_ session: ARSession) {
+    /// The detail pass's camera setup. With the room scan's world map, ARKit relocalizes into the same
+    /// coordinates as the RoomPlan scan before tracking becomes normal (nothing is recorded until then).
+    /// - Parameter simple: fallback without the high-resolution video format and the live mesh.
+    static func configuration(worldMap: ARWorldMap?, simple: Bool) -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
+        config.initialWorldMap = worldMap
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
         }
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            config.sceneReconstruction = .mesh
+        if !simple {
+            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+                config.sceneReconstruction = .mesh
+            }
+            if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                config.videoFormat = format
+            }
         }
-        if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
-            config.videoFormat = format
-        }
-        session.run(config)
+        return config
     }
 
     /// Call about 10 times a second during the detail pass.

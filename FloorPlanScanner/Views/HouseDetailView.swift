@@ -29,6 +29,7 @@ struct HouseDetailView: View {
     @State private var confirmDelete = false
     @State private var capturing: CaptureTarget?
     @State private var showTips = false
+    @State private var showDetailPass = false
 
     struct ViewTarget: Identifiable {
         let url: URL
@@ -67,6 +68,9 @@ struct HouseDetailView: View {
         .sheet(isPresented: $showTips) { NavigationStack { TrackingTipsView() } }
         .fullScreenCover(item: $rescanning) { target in
             RoomScanView(houseID: target.id, isNew: false) { _ in }
+        }
+        .fullScreenCover(isPresented: $showDetailPass) {
+            DetailPassScreen(houseID: houseID) { showDetailPass = false }
         }
         .fullScreenCover(item: $capturing) { target in
             CaptureView(scanID: target.scanID) { scanID in
@@ -145,6 +149,14 @@ struct HouseDetailView: View {
                           systemImage: "paintbrush.pointed")
                 }
                 .disabled(!store.hasRoom(houseID) || builder.isRunning)
+                if store.hasWorldMap(houseID) && DeviceSupport.canScanRooms {
+                    Button {
+                        showDetailPass = true
+                    } label: {
+                        Label(house.hasDetailPass ? "Redo detail pass" : "Add detail pass", systemImage: "sparkles")
+                    }
+                    .disabled(builder.isRunning)
+                }
                 Toggle("Include ceilings", isOn: Binding(
                     get: { store.house(houseID)?.includeCeilings ?? false },
                     set: { value in store.mutate(houseID) { $0.includeCeilings = value } }))

@@ -14,6 +14,8 @@ final class RoomScanController: NSObject, ObservableObject, RoomCaptureViewDeleg
     @Published var phase: Phase = .scanning
     /// Bumped to throw away the scanner view and start a fresh scan.
     @Published var generation = 0
+    /// Saved when the scan finishes, so the detail pass can line up with this scan.
+    @Published var worldMap: ARWorldMap?
     private weak var captureView: RoomCaptureView?
 
     override init() { super.init() }
@@ -34,8 +36,26 @@ final class RoomScanController: NSObject, ObservableObject, RoomCaptureViewDeleg
 
     @MainActor func finish() {
         phase = .processing
-        // Keep the AR session running, so the detail pass continues in the same world coordinates.
-        captureView?.captureSession.stop(pauseARSession: false)
+        guard let view = captureView else { return }
+        // Grab the tracking map before stopping: the detail pass relocalizes into these coordinates.
+        stopRequested = false
+        view.captureSession.arSession.getCurrentWorldMap { [weak self] map, error in
+            if let error { print("No world map: \(error)") }
+            Task { @MainActor in
+                self?.worldMap = map
+                self?.stopOnce()
+            }
+        }
+        // Don't wait forever for the map.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.stopOnce() }
+    }
+
+    private var stopRequested = false
+
+    @MainActor private func stopOnce() {
+        guard !stopRequested else { return }
+        stopRequested = true
+        captureView?.captureSession.stop()
     }
 
     @MainActor func rescan() {
@@ -94,11 +114,8 @@ struct RoomScanView: View {
     @State private var introDone: Bool
     @State private var saving = false
     @State private var saveError: String?
-    @StateObject private var detail = DetailRecorder()
     @State private var detailStage: DetailStage = .none
-    @State private var detailSession: ARSession?
-    @State private var detailStarted = Date()
-    @State private var detailElapsed = 0
+    @State private var detailNote: String?
 
     private enum DetailStage { case none, intro, recording }
     private let ticker = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
@@ -119,16 +136,18 @@ struct RoomScanView: View {
     var body: some View {
         if !introDone {
             ScanGuideIntroView(onStart: { introDone = true }, onCancel: { cancel() })
+        } else if detailStage == .recording {
+            // RoomPlan's view is gone (which releases the camera); the detail pass has its own session.
+            DetailPassScreen(houseID: houseID) { finishAll() }
         } else {
             ZStack {
                 RoomCaptureRepresentable(controller: controller)
                     .id(controller.generation)
                     .ignoresSafeArea()
-                    .opacity(detailStage == .none ? 1 : 0)
                     .allowsHitTesting(detailStage == .none)
 
-                if detailStage != .none {
-                    detailLayer
+                if detailStage == .intro {
+                    detailIntroLayer
                 } else {
                 VStack(spacing: 10) {
                     topBar
@@ -151,59 +170,28 @@ struct RoomScanView: View {
             .onAppear { beginRecording() }
             .onReceive(ticker) { _ in
                 if isScanning { coach.tick(session: controller.arSession) }
-                if detailStage == .recording { detailElapsed = Int(Date().timeIntervalSince(detailStarted)) }
             }
             .onReceive(photoTicker) { _ in
                 if isScanning { recorder.tick(session: controller.arSession) }
-                if detailStage == .recording { detail.tick(session: detailSession) }
             }
         }
     }
 
     // MARK: Detail pass
 
-    @ViewBuilder
-    private var detailLayer: some View {
-        if detailStage == .recording, let session = detailSession {
-            DetailARView(session: session).ignoresSafeArea()
-        } else {
-            Color.black.opacity(0.4).ignoresSafeArea()
-        }
-        VStack {
+    private var detailIntroLayer: some View {
+        VStack(spacing: 10) {
             Spacer()
-            if detailStage == .intro {
-                DetailIntroCard(onStart: startDetail, onSkip: { finishAll(withDetail: false) })
-            } else {
-                DetailPassCard(recorder: detail, elapsed: detailElapsed) { finishAll(withDetail: true) }
+            if let detailNote {
+                Text(detailNote).font(.footnote).foregroundStyle(.white)
+                    .padding(10).background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
             }
+            DetailIntroCard(onStart: { detailStage = .recording }, onSkip: { finishAll() })
         }
         .padding()
     }
 
-    private func startDetail() {
-        guard let session = detailSession else {
-            finishAll(withDetail: false)
-            return
-        }
-        DetailRecorder.configure(session)
-        detail.begin(photoDir: store.highResURL(for: houseID), depthDir: store.depthFramesURL(for: houseID),
-                     photoLogURL: store.highResLogURL(for: houseID), depthLogURL: store.depthFrameLogURL(for: houseID))
-        detailStarted = Date()
-        detailElapsed = 0
-        detailStage = .recording
-    }
-
-    private func finishAll(withDetail: Bool) {
-        if withDetail && detailStage == .recording {
-            detail.finish()
-            let photos = detail.photoCount, depths = detail.depthCount
-            store.mutate(houseID) {
-                $0.highResCount = photos
-                $0.depthFrameCount = depths
-                $0.hasDetailPass = photos > 0 || depths > 0
-            }
-        }
-        detailSession?.pause()
+    private func finishAll() {
         onFinish(houseID)
         dismiss()
     }
@@ -350,9 +338,13 @@ struct RoomScanView: View {
                 $0.objectCount = room.objects.count
             }
             saving = false
-            // Same AR session, still tracking: offer the detail pass.
-            detailSession = controller.arSession
-            detailStage = .intro
+            // Save the tracking map so the detail pass (now or later) lines up with this scan.
+            if let map = controller.worldMap, store.saveWorldMap(map, for: id) {
+                detailStage = .intro
+            } else {
+                // Without a map the detail pass can't line up with the room scan: finish with the room scan only.
+                finishAll()
+            }
         }
     }
 
